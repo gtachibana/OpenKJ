@@ -172,7 +172,7 @@ jobs:
        arch: ${{ matrix.qtarch }}
        modules: 'qtnetworkauth'
        archives: 'qtbase qtsvg'
-       tools: 'tools_openssl_x64 tools_mingw1310'
+       tools: 'tools_mingw1310_64'
 
     - name: Add Qt MinGW to PATH
       shell: bash
@@ -237,8 +237,12 @@ jobs:
     - name: Copy in OpenSSL
       shell: bash
       run: |
-        cp "$QT_ROOT_DIR/../../../Tools/OpenSSL/Win_x64/bin/libssl-3-x64.dll" output/
-        cp "$QT_ROOT_DIR/../../../Tools/OpenSSL/Win_x64/bin/libcrypto-3-x64.dll" output/
+        if [ -f "$QT_ROOT_DIR/../../../Tools/OpenSSL/Win_x64/bin/libssl-3-x64.dll" ]; then
+          cp "$QT_ROOT_DIR/../../../Tools/OpenSSL/Win_x64/bin/libssl-3-x64.dll" output/
+          cp "$QT_ROOT_DIR/../../../Tools/OpenSSL/Win_x64/bin/libcrypto-3-x64.dll" output/
+        else
+          echo "OpenSSL tools not found, skipping"
+        fi
 
     # - name: Sign OpenKJ executable
     #   run: |
