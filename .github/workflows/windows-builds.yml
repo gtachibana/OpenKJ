@@ -31,7 +31,7 @@ jobs:
     - name: inno install
       working-directory: 'C:\'
       run: |
-        curl.exe -sLO https://files.jrsoftware.org/is/6/innosetup-6.4.3.exe
+        curl.exe -sLO https://github.com/jrsoftware/issrc/releases/download/is-6-4-3/innosetup-6.4.3.exe
         .\innosetup-6.4.3.exe /silent
 
     - name: Get version from git tag
