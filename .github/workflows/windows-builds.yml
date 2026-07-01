@@ -176,7 +176,7 @@ jobs:
        arch: ${{ matrix.qtarch }}
        modules: 'qtnetworkauth'
        archives: 'qtbase qtsvg'
-       tools: 'tools_mingw1310_64'
+       tools: 'tools_mingw1310'
 
     - name: Add Qt MinGW to PATH
       shell: bash
