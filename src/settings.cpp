@@ -1470,6 +1470,17 @@ void Settings::setKaraokeAutoAdvance(bool enabled)
     emit karaokeAutoAdvanceChanged(enabled);
 }
 
+// when enabled, adding a song to a queue while karaoke is idle starts the autoplay countdown
+bool Settings::karaokeAutoPlayFirstSong()
+{
+    return settings->value("karaokeAutoPlayFirstSong", false).toBool();
+}
+
+void Settings::setKaraokeAutoPlayFirstSong(bool enabled)
+{
+    settings->setValue("karaokeAutoPlayFirstSong", enabled);
+}
+
 void Settings::setShowSongInterruptionWarning(bool enabled)
 {
     settings->setValue("showSongInterruptionWarning", enabled);

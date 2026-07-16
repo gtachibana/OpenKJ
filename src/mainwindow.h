@@ -182,7 +182,7 @@ public:
     ~MainWindow() override;
 
 private slots:
-    void onSongSubmittedViaApi();
+    void startAutoPlayIfIdle();
     void search();
     void databaseUpdated();
     void databaseCleared();

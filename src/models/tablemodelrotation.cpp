@@ -395,6 +395,33 @@ void TableModelRotation::singerMove(const int oldPosition, const int newPosition
                     );
 }
 
+// Moves a singer up in the rotation so that they sit ahead of any singers who have no
+// unplayed songs in their queue. Called when a song is added to the singer's queue.
+// The singer is only ever moved up, and never ahead of the current singer or of any
+// singer who has songs queued, so the relative order of active singers is preserved.
+// Over time this sinks singers with empty queues to the bottom of the rotation.
+void TableModelRotation::singerMoveAheadOfEmptySingers(const int singerId) {
+    const auto &singer = getSinger(singerId);
+    if (!singer.isValid() || singerId == m_currentSingerId)
+        return;
+    // find the last position occupied by a singer who must stay ahead of this one
+    // (the current singer or anyone with unplayed songs)
+    int lastKeepPos{-1};
+    for (const auto &other : m_singers) {
+        if (other.id == singerId)
+            continue;
+        if (other.id == m_currentSingerId || other.numSongsUnsung() > 0)
+            lastKeepPos = std::max(lastKeepPos, other.position);
+    }
+    int oldPos = singer.position;
+    int targetPos = lastKeepPos + 1;
+    if (oldPos <= targetPos)
+        return;
+    m_logger->debug("{} Moving singer '{}' from position {} to {} to keep them ahead of singers with empty queues",
+                    m_loggingPrefix, singer.name, oldPos, targetPos);
+    singerMove(oldPos, targetPos);
+}
+
 void TableModelRotation::singerSetName(const int singerId, const QString &newName) {
     m_logger->debug("{} Renaming singer '{}' to '{}'", m_loggingPrefix, getSinger(singerId).name, newName);
     auto it = std::find_if(m_singers.begin(), m_singers.end(), [&singerId](okj::RotationSinger &singer) {

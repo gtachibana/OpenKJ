@@ -98,6 +98,8 @@ public:
     void commitChanges();
     int singerAdd(const QString& name, int positionHint = ADD_BOTTOM);
     void singerMove(int oldPosition, int newPosition, bool skipCommit = false);
+    // moves the singer up so they're ahead of singers with no unplayed queued songs
+    void singerMoveAheadOfEmptySingers(int singerId);
     void singerSetName(int singerId, const QString &newName);
     void singerDelete(int singerId);
     void singerSetRegular(int singerId, bool isRegular);

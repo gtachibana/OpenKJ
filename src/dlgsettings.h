@@ -152,6 +152,7 @@ private slots:
     void on_lineEditApiKey_editingFinished();
     void on_checkBoxShowKAAAlert_toggled(bool checked);
     void on_checkBoxKAA_toggled(bool checked);
+    void on_checkBoxAutoPlayFirst_toggled(bool checked);
     void on_spinBoxAADelay_valueChanged(int arg1);
     void on_btnAlertFont_clicked();
     void on_btnAlertTxtColor_clicked();

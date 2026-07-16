@@ -258,6 +258,7 @@ int TableModelQueueSongs::add(const int songId) {
     });
     emit layoutChanged();
     emit queueModified(m_curSingerId);
+    emit songAdded(m_curSingerId);
     return queueSongId;
 }
 
@@ -372,6 +373,7 @@ void TableModelQueueSongs::songAddSlot(int songId, int singerId, int keyChg) {
         query.exec();
         if (auto error = query.lastError(); error.type() != QSqlError::NoError)
             m_logger->error("{} DB error: {}", m_loggingPrefix, error.text());
+        emit songAdded(singerId);
     }
 }
 

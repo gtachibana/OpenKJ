@@ -87,6 +87,9 @@ private:
 
 signals:
     void queueModified(int singerId);
+    // emitted only when a new song is added to a singer's queue, unlike queueModified
+    // which also fires on moves, key changes, played-state changes, and removals
+    void songAdded(int singerId);
     void songDroppedWithoutSinger();
     void filesDroppedOnSinger(QList<QUrl> urls, int singerId, int position);
     void qSongsMoved(int startRow, int startCol, int endRow, int endCol);

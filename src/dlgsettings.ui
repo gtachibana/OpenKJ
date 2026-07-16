@@ -1596,6 +1596,13 @@ QPushButton:default {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QCheckBox" name="checkBoxAutoPlayFirst">
+                     <property name="text">
+                      <string>Automatically start first song added to the queue when nothing is playing</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <layout class="QHBoxLayout" name="horizontalLayout_11">
                      <item>
                       <widget class="QLabel" name="label_9">

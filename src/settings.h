@@ -222,6 +222,8 @@ public:
     int mplxMode();
     void setMplxMode(int mode);
     bool karaokeAutoAdvance();
+    bool karaokeAutoPlayFirstSong();
+    void setKaraokeAutoPlayFirstSong(bool enabled);
     int karaokeAATimeout();
     void setKaraokeAATimeout(int secs);
     bool karaokeAAAlertEnabled();

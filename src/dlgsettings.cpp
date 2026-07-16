@@ -246,6 +246,7 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     ui->checkBoxDisplayCurrentRotationPosition->setChecked(m_settings.rotationDisplayPosition());
     ui->spinBoxAADelay->setValue(m_settings.karaokeAATimeout());
     ui->checkBoxKAA->setChecked(m_settings.karaokeAutoAdvance());
+    ui->checkBoxAutoPlayFirst->setChecked(m_settings.karaokeAutoPlayFirstSong());
     ui->checkBoxShowKAAAlert->setChecked(m_settings.karaokeAAAlertEnabled());
     ui->cbxQueueRemovalWarning->setChecked(m_settings.showQueueRemovalWarning());
     ui->cbxSingerRemovalWarning->setChecked(m_settings.showSingerRemovalWarning());
@@ -804,6 +805,12 @@ void DlgSettings::on_checkBoxKAA_toggled(bool checked) {
     if (!m_pageSetupDone)
         return;
     m_settings.setKaraokeAutoAdvance(checked);
+}
+
+void DlgSettings::on_checkBoxAutoPlayFirst_toggled(bool checked) {
+    if (!m_pageSetupDone)
+        return;
+    m_settings.setKaraokeAutoPlayFirstSong(checked);
 }
 
 void DlgSettings::on_spinBoxAADelay_valueChanged(int arg1) {

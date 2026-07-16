@@ -809,7 +809,7 @@ MainWindow::MainWindow(QWidget *parent) :
     setupShortcuts();
     setupConnections();
 
-    connect(&m_embeddedApi, &OpenKJEmbeddedApi::songSubmitted, this, &MainWindow::onSongSubmittedViaApi);
+    connect(&m_embeddedApi, &OpenKJEmbeddedApi::songSubmitted, this, &MainWindow::startAutoPlayIfIdle);
 
     if (m_settings.appMode() == Settings::LocalMode && m_settings.embeddedApiEnabled()) {
         const QHostAddress bindAddress(m_settings.embeddedApiBindAddress());
@@ -1030,6 +1030,15 @@ void MainWindow::setupConnections() {
         updateRotationDuration();
         m_rotModel.layoutChanged();
     });
+    // When a song is added to any queue, bump that singer ahead of singers with empty
+    // queues, and optionally kick off autoplay if karaoke is idle. Queued so that the
+    // rotation reposition doesn't happen mid drag-and-drop while the drop handler is
+    // still working with pre-move row positions.
+    connect(&m_qModel, &TableModelQueueSongs::songAdded, this, [&](int singerId) {
+        m_rotModel.singerMoveAheadOfEmptySingers(singerId);
+        if (m_settings.karaokeAutoPlayFirstSong())
+            startAutoPlayIfIdle();
+    }, Qt::QueuedConnection);
     connect(m_lazyDurationUpdater.get(), &LazyDurationUpdateController::gotDuration, &m_karaokeSongsModel,
             &TableModelKaraokeSongs::setSongDuration);
     connect(ui->tableViewRotation->selectionModel(), &QItemSelectionModel::selectionChanged, this,
@@ -2198,28 +2207,30 @@ void MainWindow::rotationDataChanged() {
     statusBarText += QString::number(m_rotModel.singerCount());
     m_labelSingerCount.setText(statusBarText);
     QString tickerText;
+    auto singerCount = static_cast<int>(m_rotModel.singerCount());
+    int curSingerId = m_rotModel.currentSinger();
+    int curSingerPos = (curSingerId >= 0) ? m_rotModel.getSinger(curSingerId).position : -1;
+    // upcoming singers in rotation order, only those with unplayed songs in their queue
+    QStringList upcomingSingers;
+    for (int i = 1; singerCount > 0 && i <= singerCount; i++) {
+        const auto &singer = m_rotModel.getSingerAtPosition((curSingerPos + i) % singerCount);
+        if (singer.id == curSingerId)
+            continue;
+        if (singer.numSongsUnsung() > 0)
+            upcomingSingers.append(singer.name);
+    }
     if (m_settings.tickerCustomString() != "") {
         tickerText += m_settings.tickerCustomString() + " " + sep + " ";
-        QString cs = m_rotModel.getSinger(m_rotModel.currentSinger()).name;
-        int nsPos;
+        QString cs = (curSingerId >= 0) ? m_rotModel.getSinger(curSingerId).name : QString();
         if (cs == "") {
             cs = m_rotModel.getSingerAtPosition(0).name;
             if (cs == "")
                 cs = "[nobody]";
-            nsPos = 0;
-        } else
-            nsPos = m_rotModel.getSinger(m_rotModel.currentSinger()).position;
-        QString ns = "[nobody]";
-        if (m_rotModel.singerCount() > 0) {
-            if (nsPos + 1 < m_rotModel.singerCount())
-                nsPos++;
-            else
-                nsPos = 0;
-            ns = m_rotModel.getSingerAtPosition(nsPos).name;
         }
+        QString ns = upcomingSingers.isEmpty() ? "[nobody]" : upcomingSingers.first();
         tickerText.replace("%cs", cs);
         tickerText.replace("%ns", ns);
-        tickerText.replace("%rc", QString::number(m_rotModel.singerCount()));
+        tickerText.replace("%rc", QString::number(singerCount));
         if (ui->labelArtist->text() == "None" && ui->labelTitle->text() == "None")
             tickerText.replace("%curSong", "None");
         else
@@ -2232,41 +2243,28 @@ void MainWindow::rotationDataChanged() {
     }
     if (m_settings.tickerShowRotationInfo()) {
         tickerText += "Singers: ";
-        tickerText += QString::number(m_rotModel.singerCount());
+        tickerText += QString::number(singerCount);
         tickerText += " " + sep + " Current: ";
-        int displayPos;
-        QString curSingerName = m_rotModel.getSinger(m_rotModel.currentSinger()).name;
-        if (m_rotModel.currentSinger() < 0)
-            curSingerName = "None";
-        if (curSingerName != "") {
-            tickerText += curSingerName;
-            displayPos = m_rotModel.getSinger(m_rotModel.currentSinger()).position;
-        } else {
+        QString curSingerName = m_rotModel.getSinger(curSingerId).name;
+        if (curSingerId < 0 || curSingerName == "")
             tickerText += "None ";
-            displayPos = -1;
-        }
+        else
+            tickerText += curSingerName;
         int listSize;
-        if (m_settings.tickerFullRotation() || (m_rotModel.singerCount() < m_settings.tickerShowNumSingers())) {
-            if (curSingerName == "")
-                listSize = static_cast<int>(m_rotModel.singerCount());
-            else
-                listSize = static_cast<int>(m_rotModel.singerCount() - 1);
+        if (m_settings.tickerFullRotation() || (upcomingSingers.size() < m_settings.tickerShowNumSingers())) {
+            listSize = static_cast<int>(upcomingSingers.size());
             if (listSize > 0)
                 tickerText += " " + sep + " Upcoming: ";
         } else {
             listSize = m_settings.tickerShowNumSingers();
             tickerText += " " + sep + " Next ";
-            tickerText += QString::number(m_settings.tickerShowNumSingers());
+            tickerText += QString::number(listSize);
             tickerText += " Singers: ";
         }
         for (int i = 0; i < listSize; i++) {
-            if (displayPos + 1 < m_rotModel.singerCount())
-                displayPos++;
-            else
-                displayPos = 0;
             tickerText += QString::number(i + 1);
             tickerText += ") ";
-            tickerText += m_rotModel.getSingerAtPosition(displayPos).name;
+            tickerText += upcomingSingers.at(i);
             if (i < listSize - 1)
                 tickerText += " ";
         }
@@ -4529,8 +4527,12 @@ void MainWindow::showAddSingerDialog() {
         dlgAddSinger->raise();
 }
 
-void MainWindow::onSongSubmittedViaApi() {
-    if (!m_settings.karaokeAutoAdvance())
+// Starts the autoplay countdown for the next unplayed song in the rotation, but only
+// if nothing is playing or paused and no countdown is already running. Triggered by
+// song submissions from the embedded API and, when the "auto play first song" setting
+// is enabled, by songs added locally through the UI.
+void MainWindow::startAutoPlayIfIdle() {
+    if (!m_settings.karaokeAutoAdvance() && !m_settings.karaokeAutoPlayFirstSong())
         return;
     if (m_timerKaraokeAA.isActive())
         return;
@@ -4560,12 +4562,12 @@ void MainWindow::onSongSubmittedViaApi() {
         }
     }
     if (empty) {
-        m_logger->info("{} KaraokeAA (api) - No songs found after submission", m_loggingPrefix);
+        m_logger->info("{} KaraokeAA (idle) - No unplayed songs found, not starting autoplay", m_loggingPrefix);
         return;
     }
     m_kAANextSinger = nextSinger.id;
     m_kAANextSongPath = nextSongPath;
-    m_logger->info("{} KaraokeAA (api) - Resuming autoplay for: {}", m_loggingPrefix, nextSinger.name.toStdString());
+    m_logger->info("{} KaraokeAA (idle) - Resuming autoplay for: {}", m_loggingPrefix, nextSinger.name.toStdString());
     m_timerKaraokeAA.start(m_settings.karaokeAATimeout() * 1000);
     cdgWindow->setNextSinger(nextSinger.name);
     cdgWindow->setNextSong(nextSinger.nextSongArtistTitle());
