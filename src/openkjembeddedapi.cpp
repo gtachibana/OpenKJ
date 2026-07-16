@@ -452,6 +452,18 @@ QJsonObject OpenKJEmbeddedApi::commandSubmitRequest(const QJsonObject &payload)
         singerId = m_rotationModel.singerAdd(singerName, m_settings.lastSingerAddPositionType());
     }
 
+    QSqlQuery dupeCheck;
+    dupeCheck.prepare("SELECT 1 FROM queuesongs WHERE singer = :singerId AND song = :songId AND played = 0 LIMIT 1");
+    dupeCheck.bindValue(":singerId", singerId);
+    dupeCheck.bindValue(":songId", songId);
+    if (dupeCheck.exec() && dupeCheck.next()) {
+        QJsonObject out;
+        out.insert("command", "submitRequest");
+        out.insert("error", "true");
+        out.insert("errorString", "This song is already in your queue");
+        return out;
+    }
+
     m_queueModel.songAddSlot(songId, singerId, 0);
     nextSerial();
     emit songSubmitted();
