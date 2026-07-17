@@ -3,6 +3,7 @@
 #include <QString>
 #include <QFileInfo>
 #include <QDirIterator>
+#include <QRegularExpression>
 
 // Given a cdg file path, tries to find a matching supported audio file
 // Returns an empty QString if no match is found
@@ -36,8 +37,14 @@ inline QString findMatchingAudioFile(const QString &cdgFilePath) {
     return QString();
 }
 
-
-
+// Strips any "[...]" bracketed segments (e.g. "[Karaoke Version]") out of a
+// song artist/title string, collapsing the resulting whitespace.
+inline QString stripBracketedText(const QString &text) {
+    static const QRegularExpression bracketRe(R"(\[[^\]]*\])");
+    QString result = text;
+    result.remove(bracketRe);
+    return result.simplified();
+}
 
 
 

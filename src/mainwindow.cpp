@@ -2090,6 +2090,13 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
                 if (curSingerId == -1)
                     curPos = static_cast<int>(m_rotModel.singerCount() - 1);
                 int loops = 0;
+                // Under "current singer on top", the current singer still physically
+                // occupies position 0 at this point (they aren't moved to the bottom
+                // until after this search), so if their original position was last in
+                // line, wrapping around would immediately land back on themselves.
+                // Don't let that count as "next" until every other singer has had a
+                // chance, otherwise a singer with 2+ queued songs can play back to back.
+                int otherSingers = std::max(static_cast<int>(m_rotModel.singerCount()) - 1, 0);
                 while ((nextSongPath == "") && (!empty)) {
                     if (loops > m_rotModel.singerCount()) {
                         empty = true;
@@ -2098,7 +2105,8 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
                             curPos = 0;
                         }
                         nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                        nextSongPath = nextSinger.nextSongPath();
+                        if (nextSinger.id != curSingerId || loops >= otherSingers)
+                            nextSongPath = nextSinger.nextSongPath();
                         loops++;
                     }
                 }
@@ -2227,15 +2235,17 @@ void MainWindow::rotationDataChanged() {
                 cs = "[nobody]";
         }
         QString ns = upcomingSingers.isEmpty() ? "[nobody]" : upcomingSingers.first();
+        QString curArtistText = stripBracketedText(ui->labelArtist->text());
+        QString curTitleText = stripBracketedText(ui->labelTitle->text());
         tickerText.replace("%cs", cs);
         tickerText.replace("%ns", ns);
         tickerText.replace("%rc", QString::number(singerCount));
         if (ui->labelArtist->text() == "None" && ui->labelTitle->text() == "None")
             tickerText.replace("%curSong", "None");
         else
-            tickerText.replace("%curSong", ui->labelArtist->text() + " - " + ui->labelTitle->text());
-        tickerText.replace("%m_curArtist", ui->labelArtist->text());
-        tickerText.replace("%m_curTitle", ui->labelTitle->text());
+            tickerText.replace("%curSong", curArtistText + " - " + curTitleText);
+        tickerText.replace("%m_curArtist", curArtistText);
+        tickerText.replace("%m_curTitle", curTitleText);
         tickerText.replace("%m_curSinger", cs);
         tickerText.replace("%nextSinger", ns);
 
@@ -4549,6 +4559,10 @@ void MainWindow::startAutoPlayIfIdle() {
     if (curSingerId == -1)
         curPos = static_cast<int>(m_rotModel.singerCount() - 1);
     int loops = 0;
+    // See karaokeMediaBackend_stateChanged: under "current singer on top", curPos may
+    // wrap back onto the current singer's own slot before every other singer has been
+    // checked, so don't accept them as "next" until everyone else has had a chance.
+    int otherSingers = std::max(static_cast<int>(m_rotModel.singerCount()) - 1, 0);
     while ((nextSongPath == "") && (!empty)) {
         if (loops > m_rotModel.singerCount()) {
             empty = true;
@@ -4556,7 +4570,8 @@ void MainWindow::startAutoPlayIfIdle() {
             if (++curPos >= m_rotModel.singerCount())
                 curPos = 0;
             nextSinger = m_rotModel.getSingerAtPosition(curPos);
-            nextSongPath = nextSinger.nextSongPath();
+            if (nextSinger.id != curSingerId || loops >= otherSingers)
+                nextSongPath = nextSinger.nextSongPath();
             loops++;
         }
     }
