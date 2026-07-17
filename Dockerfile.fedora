@@ -8,7 +8,6 @@ RUN dnf upgrade -y && \
 	qt6-qtsvg-devel \
 	gstreamer1-devel \
 	gstreamer1-plugins-base-devel \
-	taglib-devel \
 	&& \
 	dnf clean all
 
