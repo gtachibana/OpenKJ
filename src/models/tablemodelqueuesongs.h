@@ -64,6 +64,7 @@ public:
     void setPlayed(int qSongId, bool played = true);
     void removeAll();
     void commitChanges();
+    [[nodiscard]] static bool singerHasUnplayedSong(int singerId, int songId);
 
 private:
     std::string m_loggingPrefix{"[QueueSongsModel]"};

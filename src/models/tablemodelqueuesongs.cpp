@@ -348,6 +348,23 @@ void TableModelQueueSongs::commitChanges() {
     query.exec("COMMIT");
 }
 
+bool TableModelQueueSongs::singerHasUnplayedSong(const int singerId, const int songId) {
+    // Matches on artist+title as well as song id so a different library variant of the
+    // same song (other manufacturer/disc) still counts as a duplicate. Artist and Title
+    // are COLLATE NOCASE, so the comparison is case-insensitive.
+    QSqlQuery query;
+    query.prepare("SELECT 1 FROM queuesongs qs "
+                  "INNER JOIN dbsongs queued ON queued.songid = qs.song "
+                  "INNER JOIN dbsongs requested ON requested.songid = :songId "
+                  "WHERE qs.singer = :singerId AND qs.played = 0 "
+                  "AND (qs.song = requested.songid "
+                  "     OR (queued.artist = requested.artist AND queued.title = requested.title)) "
+                  "LIMIT 1");
+    query.bindValue(":songId", songId);
+    query.bindValue(":singerId", singerId);
+    return query.exec() && query.next();
+}
+
 void TableModelQueueSongs::songAddSlot(int songId, int singerId, int keyChg) {
     if (singerId == m_curSingerId) {
         int queueSongId = add(songId);

@@ -27,6 +27,7 @@
 #include <QProgressDialog>
 #include <QSqlQuery>
 #include "src/models/tableviewtooltipfilter.h"
+#include "src/models/tablemodelqueuesongs.h"
 #include "dlgvideopreview.h"
 
 #include <spdlog/sinks/basic_file_sink.h>
@@ -334,7 +335,13 @@ void DlgRequests::on_pushButtonAddSong_clicked() {
         );
         m_reqLogger->flush();
     } else if (ui->radioButtonExistingSinger->isChecked()) {
-        emit addRequestSong(song->id, rotModel.getSingerByName(ui->comboBoxSingers->currentText()).id, keyChg);
+        const int singerId = rotModel.getSingerByName(ui->comboBoxSingers->currentText()).id;
+        if (TableModelQueueSongs::singerHasUnplayedSong(singerId, song->id)) {
+            QMessageBox::information(this, tr("Duplicate song"),
+                                     tr("This singer already has this song pending in their queue.  The song was not added."));
+            return;
+        }
+        emit addRequestSong(song->id, singerId, keyChg);
         m_reqLogger->info("RequestID: {} | Added to existing singer | Name: {} | Song: {} - {} - {} | Key: {}",
                           curRequestId,
                           ui->comboBoxSingers->currentText().toStdString(),
@@ -598,6 +605,15 @@ bool DlgRequests::autoImportRequest(const OkjsRequest &request)
         singerId = rotModel.getSingerByName(singerName).id;
     } else {
         singerId = rotModel.singerAdd(singerName, m_settings.lastSingerAddPositionType());
+    }
+
+    if (TableModelQueueSongs::singerHasUnplayedSong(singerId, songId.value())) {
+        songbookApi.removeRequest(request.requestId);
+        m_reqLogger->info("RequestID: {} | Ignored duplicate request, singer already has song pending | Singer: {} | SongID: {}",
+                          request.requestId,
+                          singerName.toStdString(),
+                          songId.value());
+        return true;
     }
 
     emit addRequestSong(songId.value(), singerId, request.key);
