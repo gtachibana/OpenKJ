@@ -2,7 +2,10 @@
 #define DURATIONLAZYUPDATER_H
 
 #include <QObject>
+#include <QPair>
 #include <QThread>
+#include <QTimer>
+#include <QVector>
 #include <spdlog/spdlog.h>
 #include <spdlog/async_logger.h>
 #include <spdlog/fmt/ostr.h>
@@ -24,8 +27,12 @@ class LazyDurationUpdateController : public QObject
     Q_OBJECT
     QThread workerThread;
     QStringList files;
+    QTimer m_flushTimer;
+    QVector<QPair<QString, int>> m_pendingUpdates;
     std::string m_loggingPrefix{"[LazyDurationController]"};
     std::shared_ptr<spdlog::logger> m_logger;
+
+    void flushPendingUpdates();
 
 public:
     explicit LazyDurationUpdateController(QObject *parent = nullptr);
@@ -37,7 +44,7 @@ public slots:
     void getDurations();
 signals:
     void operate(const QStringList &list);
-    void gotDuration(const QString &path, unsigned int duration);
+    void gotDurations(const QVector<QPair<QString, int>> &durations);
 };
 
 

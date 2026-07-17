@@ -194,9 +194,29 @@ void TableModelKaraokeSongs::loadData() {
                 (query.value(3).toString() == "!!DROPPED!!")
         }));
     }
-    m_logger->info("{} Loaded {} karaoke songs from the db on disk", m_loggingPrefix, m_filteredSongs.size());
+    rebuildPathHash();
+    m_logger->info("{} Loaded {} karaoke songs from the db on disk", m_loggingPrefix, m_allSongs.size());
     search(m_lastSearch);
     emit layoutChanged();
+}
+
+// Shares the song objects already loaded by another model instance instead of
+// re-reading and re-building them from the database. Filter state stays independent.
+void TableModelKaraokeSongs::loadDataFrom(const TableModelKaraokeSongs &source) {
+    emit layoutAboutToBeChanged();
+    m_allSongs = source.m_allSongs;
+    m_filteredSongs.clear();
+    rebuildPathHash();
+    m_logger->info("{} Loaded {} karaoke songs shared from the primary model", m_loggingPrefix, m_allSongs.size());
+    search(m_lastSearch);
+    emit layoutChanged();
+}
+
+void TableModelKaraokeSongs::rebuildPathHash() {
+    m_songsByPath.clear();
+    m_songsByPath.reserve(static_cast<int>(m_allSongs.size()));
+    for (const auto &song : m_allSongs)
+        m_songsByPath.insert(song->path, song);
 }
 
 void TableModelKaraokeSongs::search(const QString &searchString) {
@@ -272,12 +292,10 @@ void TableModelKaraokeSongs::setSearchType(TableModelKaraokeSongs::SearchType ty
 }
 
 int TableModelKaraokeSongs::getIdForPath(const QString &path) {
-    auto it = std::find_if(m_allSongs.begin(), m_allSongs.end(), [&](const std::shared_ptr<okj::KaraokeSong> &song) {
-        return (song->path == path);
-    });
-    if (it == m_allSongs.end())
+    auto it = m_songsByPath.constFind(path);
+    if (it == m_songsByPath.constEnd())
         return -1;
-    return it->get()->id;
+    return it.value()->id;
 }
 
 QString TableModelKaraokeSongs::getPath(const int songId) {
@@ -410,22 +428,15 @@ void TableModelKaraokeSongs::sort(int column, Qt::SortOrder order) {
     search(m_lastSearch);
 }
 
-void TableModelKaraokeSongs::setSongDuration(const QString &path, unsigned int duration) {
-    auto it = find_if(m_allSongs.begin(), m_allSongs.end(), [&path](const std::shared_ptr<okj::KaraokeSong> &song) {
-        return (song->path == path);
-    });
-    if (it == m_allSongs.end())
-        return;
-    it->get()->duration = static_cast<int>(duration);
-    int songId = it->get()->id;
-    auto it2 = find_if(m_filteredSongs.begin(), m_filteredSongs.end(),
-                       [&songId](const std::shared_ptr<okj::KaraokeSong> &song) {
-                           return (song->id == songId);
-                       });
-    if (it2 != m_filteredSongs.end()) {
-        int row = (int) std::distance(m_filteredSongs.begin(), it2);
-        emit dataChanged(this->index(row, COL_DURATION), this->index(row, COL_DURATION), QVector<int>(Qt::DisplayRole));
+void TableModelKaraokeSongs::setSongDurations(const QVector<QPair<QString, int>> &durations) {
+    for (const auto &[path, duration] : durations) {
+        auto it = m_songsByPath.constFind(path);
+        if (it != m_songsByPath.constEnd())
+            it.value()->duration = duration;
     }
+    if (!m_filteredSongs.empty())
+        emit dataChanged(index(0, COL_DURATION), index(static_cast<int>(m_filteredSongs.size()) - 1, COL_DURATION),
+                         QVector<int>{Qt::DisplayRole});
 }
 
 void TableModelKaraokeSongs::markSongBad(QString path) {
@@ -477,6 +488,7 @@ TableModelKaraokeSongs::DeleteStatus TableModelKaraokeSongs::removeBadSong(QStri
                                                  return (song->path == path);
                                              });
         m_allSongs.erase(newAllSongsEnd, m_allSongs.end());
+        m_songsByPath.remove(path);
 
         if (isCdg) {
             if (!QFile::remove(mediaFile)) {
@@ -542,7 +554,8 @@ int TableModelKaraokeSongs::addSong(okj::KaraokeSong song) {
     } else {
         int lastInsertId = query.lastInsertId().toInt();
         song.id = lastInsertId;
-        m_allSongs.push_back(std::make_shared<okj::KaraokeSong>(song));
+        auto newSong = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(song));
+        m_songsByPath.insert(newSong->path, newSong);
         search(m_lastSearch);
         return lastInsertId;
     }

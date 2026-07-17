@@ -43,7 +43,10 @@ private:
     Ui::DlgRequests *ui;
     TableModelRequests *requestsModel;
     //SongDBTableModel *songDbModel;
+    // Shares song data with the main window's model (via loadDataFrom) but keeps
+    // its own instance so this dialog's search filter is independent.
     TableModelKaraokeSongs dbModel;
+    TableModelKaraokeSongs &karaokeSongsModel;
     TableModelRotation &rotModel;
     QString rtClickFile;
     int curRequestId;
@@ -55,7 +58,8 @@ private:
     Settings m_settings;
 
 public:
-    explicit DlgRequests(TableModelRotation &rotationModel, OKJSongbookAPI &songbookAPI, QWidget *parent = nullptr);
+    explicit DlgRequests(TableModelRotation &rotationModel, OKJSongbookAPI &songbookAPI,
+                         TableModelKaraokeSongs &karaokeSongsModel, QWidget *parent = nullptr);
     int numRequests();
     ~DlgRequests();
 
