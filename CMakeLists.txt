@@ -89,7 +89,7 @@ if (NOT EXTERNAL_SPDLOG)
     else ()
         message(STATUS "No spdlog install found or CPM spdlog forced, pulling it in via CPM")
         include(cmake/CPM.cmake)
-        CPMAddPackage("gh:gabime/spdlog@1.11.0")
+        CPMAddPackage("gh:gabime/spdlog@1.15.3")
     endif ()
 endif ()
 
