@@ -10,7 +10,7 @@
 #include <spdlog/fmt/ostr.h>
 #include <QMutex>
 
-std::ostream& operator<<(std::ostream& os, const QString& s);
+#include "okjfmt.h"
 
 class TickerImageCreator : public QThread {
 Q_OBJECT

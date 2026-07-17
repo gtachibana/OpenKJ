@@ -8,7 +8,7 @@
 #include <spdlog/async_logger.h>
 #include <spdlog/fmt/ostr.h>
 
-std::ostream& operator<<(std::ostream& os, const QString& s);
+#include "okjfmt.h"
 
 
 class TagReader : public QObject

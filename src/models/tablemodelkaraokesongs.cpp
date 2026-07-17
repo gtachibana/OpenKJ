@@ -11,7 +11,7 @@
 #include <QMimeData>
 #include <array>
 
-std::ostream & operator<<(std::ostream& os, const QString& s);
+#include "okjfmt.h"
 
 TableModelKaraokeSongs::TableModelKaraokeSongs(QObject *parent)
         : QAbstractTableModel(parent) {
