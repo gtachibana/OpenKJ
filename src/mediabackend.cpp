@@ -305,6 +305,9 @@ void MediaBackend::resetPipeline()
     gst_element_set_state(m_pipeline, GST_STATE_NULL);
 
     m_hasVideo = false;
+    m_playbackProgressed = false;
+    m_positionWatchdogHungCycles = 0;
+    m_lastReportedDuration = -1;
     gst_element_unlink(m_decoder, m_audioBin);
     gst_element_unlink(m_decoder, m_videoBin);
     gst_element_unlink(m_cdgSrc->getSrcElement(), m_videoBin);
@@ -517,20 +520,40 @@ void MediaBackend::timerSlow_timeout()
             m_silenceDuration = 0;
     }
 
+    // Refresh duration while media is loaded. Some demuxers never post
+    // GST_MESSAGE_DURATION_CHANGED, and downstream logic (autoplay advance)
+    // depends on a nonzero duration having been reported.
+    if (m_currentState == GST_STATE_PLAYING || m_currentState == GST_STATE_PAUSED)
+    {
+        if (auto dur = duration(); dur > 0 && dur != m_lastReportedDuration)
+        {
+            m_lastReportedDuration = dur;
+            emit durationChanged(dur);
+        }
+    }
+
     // Check if playback is hung (playing but no movement since 1 second ago) for some reason
-    static int hungCycles{0};
     if (state() == PlayingState)
     {
-        if (m_positionWatchdogLastPos == currPos && m_positionWatchdogLastPos > 10)
+        if (currPos > 10)
+            m_playbackProgressed = true;
+        // Once playback has progressed, a frozen position counts as hung. This includes
+        // a position stuck at 0, which happens when the position query starts failing
+        // (e.g. a pipeline wedged at end of stream that never posted EOS).
+        if (m_positionWatchdogLastPos == currPos && m_playbackProgressed)
         {
-            hungCycles++;
-            m_logger->warn("{} Playback appears to be hung!  No position change for {} seconds!", m_loggingPrefix, hungCycles);
-            if (hungCycles >= 5)
+            m_positionWatchdogHungCycles++;
+            m_logger->warn("{} Playback appears to be hung!  No position change for {} seconds!", m_loggingPrefix, m_positionWatchdogHungCycles);
+            if (m_positionWatchdogHungCycles >= 5)
             {
-                m_logger->warn("{} Playback has been hung for {} seconds, giving up!", m_loggingPrefix, hungCycles);
+                m_logger->warn("{} Playback has been hung for {} seconds, giving up!", m_loggingPrefix, m_positionWatchdogHungCycles);
                 emit stateChanged(EndOfMediaState);
-                hungCycles = 0;
+                m_positionWatchdogHungCycles = 0;
             }
+        }
+        else
+        {
+            m_positionWatchdogHungCycles = 0;
         }
         m_positionWatchdogLastPos = currPos;
     }
@@ -673,6 +696,7 @@ void MediaBackend::gstBusFunc(GstMessage *message)
             else
                 msdur = 0;
             m_logger->debug("{} GStreamer reported duration change to {}ms", m_loggingPrefix, msdur);
+            m_lastReportedDuration = msdur;
             emit durationChanged(msdur);
             break;
         }
@@ -954,6 +978,9 @@ void MediaBackend::stopPipeline()
     gst_element_set_state(m_pipeline, GST_STATE_NULL);
     m_currentState = GST_STATE_NULL;
     m_hasVideo = false;
+    m_playbackProgressed = false;
+    m_positionWatchdogHungCycles = 0;
+    m_lastReportedDuration = -1;
     emit stateChanged(MediaBackend::StoppedState);
     emit hasActiveVideoChanged(false);
 }
