@@ -8,28 +8,6 @@
 #include <okjsongbookapi.h>
 
 
-std::ostream& operator<<(std::ostream& os, const BreakSong& b)
-{
-    return os << "{(artist="
-                    << b.artist.toStdString()
-                    << ")(title="
-                    << b.title.toStdString()
-                    << ")(path="
-                    << b.path.toStdString()
-                    << ")(fname="
-                    << b.filename.toStdString()
-                    << ")(duration="
-                    << b.duration
-                    << ")(sstring="
-                    << b.searchString
-                    << ")}";
-}
-
-std::ostream & operator<<(std::ostream& os, const QString& s)
-{
-    return os << s.toStdString();
-}
-
 TableModelBreakSongs::TableModelBreakSongs(QObject *parent)
     : QAbstractTableModel(parent)
 {

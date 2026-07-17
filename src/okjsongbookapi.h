@@ -39,9 +39,6 @@ public:
     bool operator == (const OkjsVenue& v) const;
 };
 
-std::ostream& operator<<(std::ostream& os, const OkjsVenue& v);
-
-
 typedef QList<OkjsVenue> OkjsVenues;
 
 class OKJSongbookAPI : public QObject

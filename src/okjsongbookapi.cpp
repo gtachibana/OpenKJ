@@ -14,13 +14,6 @@
 
 extern IdleDetect *filter;
 
-std::ostream &operator<<(std::ostream &os, const OkjsVenue &v) {
-    return os << "venue_id: " << v.venueId
-              << "name: " << v.name
-              << "urlName: " << v.urlName
-              << "accepting: " << v.accepting;
-}
-
 OKJSongbookAPI::OKJSongbookAPI(QObject *parent) : QObject(parent)
 {
     m_logger = spdlog::get("logger");

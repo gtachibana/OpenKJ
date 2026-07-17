@@ -115,6 +115,4 @@ Q_DECLARE_METATYPE(std::shared_ptr<okj::KaraokeSong>)
 Q_DECLARE_METATYPE(okj::QueueSong)
 Q_DECLARE_METATYPE(okj::HistorySong)
 
-std::ostream& operator<<(std::ostream& os, const okj::RotationSinger& s);
-
 #endif //OPENKJ_OKJTYPES_H
