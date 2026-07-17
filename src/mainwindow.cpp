@@ -727,7 +727,7 @@ MainWindow::MainWindow(QWidget *parent) :
     m_mediaTempDir = std::make_unique<QTemporaryDir>();
     dbDialog = std::make_unique<DlgDatabase>(m_karaokeSongsModel, this);
     dlgKeyChange = std::make_unique<DlgKeyChange>(&m_qModel, this);
-    requestsDialog = std::make_unique<DlgRequests>(m_rotModel, m_songbookApi);
+    requestsDialog = std::make_unique<DlgRequests>(m_rotModel, m_songbookApi, m_karaokeSongsModel);
     requestsDialog->setModal(false);
     dlgSongShop = std::make_unique<DlgSongShop>(m_songShop);
     dlgSongShop->setModal(false);
@@ -1039,8 +1039,8 @@ void MainWindow::setupConnections() {
         if (m_settings.karaokeAutoPlayFirstSong())
             startAutoPlayIfIdle();
     }, Qt::QueuedConnection);
-    connect(m_lazyDurationUpdater.get(), &LazyDurationUpdateController::gotDuration, &m_karaokeSongsModel,
-            &TableModelKaraokeSongs::setSongDuration);
+    connect(m_lazyDurationUpdater.get(), &LazyDurationUpdateController::gotDurations, &m_karaokeSongsModel,
+            &TableModelKaraokeSongs::setSongDurations);
     connect(ui->tableViewRotation->selectionModel(), &QItemSelectionModel::selectionChanged, this,
             &MainWindow::rotationSelectionChanged);
     connect(ui->tableViewQueue->selectionModel(), &QItemSelectionModel::selectionChanged, this, &MainWindow::tableViewQueueSelChanged);
@@ -1561,10 +1561,9 @@ void MainWindow::databaseUpdated() {
     m_settings.restoreColumnWidths(ui->tableViewDB);
     requestsDialog->databaseUpdateComplete();
     m_lazyDurationUpdater->stopWork();
-    m_lazyDurationUpdater->deleteLater();
     m_lazyDurationUpdater = std::make_unique<LazyDurationUpdateController>(this);
-    connect(m_lazyDurationUpdater.get(), &LazyDurationUpdateController::gotDuration, &m_karaokeSongsModel,
-            &TableModelKaraokeSongs::setSongDuration);
+    connect(m_lazyDurationUpdater.get(), &LazyDurationUpdateController::gotDurations, &m_karaokeSongsModel,
+            &TableModelKaraokeSongs::setSongDurations);
     m_lazyDurationUpdater->getDurations();
 }
 

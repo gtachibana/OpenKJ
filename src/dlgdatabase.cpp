@@ -182,7 +182,6 @@ void DlgDatabase::scan(bool scanAllPaths)
 
     updater.process(paths, processingOptions);
 
-    emit databaseUpdateComplete();
     showDbUpdateErrors(updater.getErrors());
 
     if (updater.missingFilesCount() > 0) {
@@ -205,8 +204,8 @@ void DlgDatabase::scan(bool scanAllPaths)
     }
 
     dbUpdateDlg->hide();
-    QMessageBox::information(this, tr("Update Complete"), tr("Database update complete."));
     emit databaseUpdateComplete();
+    QMessageBox::information(this, tr("Update Complete"), tr("Database update complete."));
 }
 
 void DlgDatabase::on_btnClearDatabase_clicked()

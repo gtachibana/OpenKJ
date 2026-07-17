@@ -3,7 +3,10 @@
 
 #include <QAbstractTableModel>
 #include <QDateTime>
+#include <QHash>
 #include <QImage>
+#include <QPair>
+#include <QVector>
 #include <memory>
 #include <QTimer>
 #include "settings.h"
@@ -46,6 +49,7 @@ public:
     [[nodiscard]] Qt::ItemFlags flags(const QModelIndex &index) const override;
     [[nodiscard]] QVariant data(const QModelIndex &index, int role) const override;
     void loadData();
+    void loadDataFrom(const TableModelKaraokeSongs &source);
     void sort(int column, Qt::SortOrder order) override;
     void search(const QString &searchString);
     void setSearchType(SearchType type);
@@ -64,6 +68,7 @@ private:
     std::shared_ptr<spdlog::logger> m_logger;
     std::vector<std::shared_ptr<okj::KaraokeSong>> m_filteredSongs;
     std::vector< std::shared_ptr<okj::KaraokeSong> > m_allSongs;
+    QHash<QString, std::shared_ptr<okj::KaraokeSong>> m_songsByPath;
     QString m_lastSearch;
     int m_curFontHeight{0};
     QImage m_iconCdg;
@@ -78,6 +83,7 @@ private:
     QTimer searchTimer{this};
 
     void searchExec();
+    void rebuildPathHash();
     static QVariant getColumnName(int section) ;
     [[nodiscard]] QVariant getColumnSizeHint(int section) const;
     [[nodiscard]] QVariant getItemDisplayData(const QModelIndex &index) const;
@@ -85,7 +91,7 @@ private:
     [[nodiscard]] QVariant getColumnDecorationRole(const QModelIndex &index) const;
 
 public slots:
-    void setSongDuration(const QString &path, unsigned int duration);
+    void setSongDurations(const QVector<QPair<QString, int>> &durations);
     void resizeIconsForFont(const QFont &font);
 
 };

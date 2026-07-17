@@ -49,8 +49,10 @@ QString toMixedCase(const QString &s) {
     return newStr;
 }
 
-DlgRequests::DlgRequests(TableModelRotation &rotationModel, OKJSongbookAPI &songbookAPI, QWidget *parent) :
+DlgRequests::DlgRequests(TableModelRotation &rotationModel, OKJSongbookAPI &songbookAPI,
+                         TableModelKaraokeSongs &karaokeSongsModel, QWidget *parent) :
         QDialog(parent),
+        karaokeSongsModel(karaokeSongsModel),
         rotModel(rotationModel),
         songbookApi(songbookAPI),
         ui(new Ui::DlgRequests) {
@@ -68,7 +70,7 @@ DlgRequests::DlgRequests(TableModelRotation &rotationModel, OKJSongbookAPI &song
     curRequestId = -1;
     ui->setupUi(this);
     requestsModel = new TableModelRequests(songbookApi, this);
-    dbModel.loadData();
+    dbModel.loadDataFrom(karaokeSongsModel);
     ui->tableViewRequests->setModel(requestsModel);
     ui->tableViewRequests->viewport()->installEventFilter(new TableViewToolTipFilter(ui->tableViewRequests));
     connect(requestsModel, &TableModelRequests::layoutChanged, this, &DlgRequests::requestsModified);
@@ -130,12 +132,12 @@ void DlgRequests::databaseAboutToUpdate() {
 }
 
 void DlgRequests::databaseUpdateComplete() {
-    dbModel.loadData();
+    dbModel.loadDataFrom(karaokeSongsModel);
     autoSizeViews();
 }
 
 void DlgRequests::databaseSongAdded() {
-    dbModel.loadData();
+    dbModel.loadDataFrom(karaokeSongsModel);
 }
 
 void DlgRequests::rotationChanged() {
