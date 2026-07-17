@@ -29,7 +29,7 @@ jobs:
         QT_DIR: "/opt/homebrew/opt/qt/"
         Qt6_DIR: "/opt/homebrew/opt/qt/"
       run: |
-        cmake -DSPDLOG_USE_BUNDLED=true . -B build -G Ninja
+        cmake . -B build -G Ninja
         ninja -C build
     - name: Upload app
       uses: actions/upload-artifact@v4

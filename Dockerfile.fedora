@@ -4,14 +4,11 @@ RUN dnf upgrade -y && \
 	dnf install -y \
 	cmake \
 	ninja \
-	qt5-qtbase-devel \
-	qt5-qtsvg-devel \
-	qt5-qtmultimedia-devel \
+	qt6-qtbase-devel \
+	qt6-qtsvg-devel \
 	gstreamer1-devel \
 	gstreamer1-plugins-base-devel \
-	spdlog-devel \
 	taglib-devel \
-	taglib-extras-devel \
 	&& \
 	dnf clean all
 
