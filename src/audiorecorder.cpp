@@ -122,7 +122,7 @@ void AudioRecorder::processGstMessage() {
                     logger->debug("{} [gstreamer] Unhandled GStreamer msg received - Element: {} - Type: {} - Name: {}",
                                   m_loggingPrefix,
                                   message->src->name,
-                                  GST_MESSAGE_TYPE(message),
+                                  static_cast<int>(GST_MESSAGE_TYPE(message)),
                                   GST_MESSAGE_TYPE_NAME(message)
                     );
             }
