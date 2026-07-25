@@ -103,6 +103,7 @@ public:
     void singerSetName(int singerId, const QString &newName);
     void singerDelete(int singerId);
     void singerSetRegular(int singerId, bool isRegular);
+    void singerSetPaused(int singerId, bool paused);
     void singerMakeRegular(int singerId);
     void singerDisableRegularTracking(int singerId);
     void clearRotation();

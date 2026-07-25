@@ -97,6 +97,10 @@ namespace okj {
     }
 
     int RotationSinger::nextSongDurationSecs() const {
+        // Only ever used for wait estimation, so a singer who has stepped away
+        // simply contributes nothing to the time until everyone else is up.
+        if (paused)
+            return 0;
         QSqlQuery query;
         query.prepare(
                 "SELECT dbsongs.duration FROM dbsongs,queuesongs WHERE queuesongs.singer = :singerid AND queuesongs.played = 0 AND dbsongs.songid = queuesongs.song ORDER BY position LIMIT 1");
@@ -171,15 +175,17 @@ namespace okj {
         m_settings = std::make_shared<Settings>();
     }
 
-    RotationSinger::RotationSinger(int id, QString name, int position, bool regular, QDateTime addTs, bool valid)
+    RotationSinger::RotationSinger(int id, QString name, int position, bool regular, QDateTime addTs, bool valid,
+                                   bool paused)
             : id(id), name(std::move(name)), position(position), regular(regular), addTs(std::move(addTs)),
-              valid(valid) {
+              valid(valid), paused(paused) {
         m_logger = spdlog::get("logger");
         m_settings = std::make_shared<Settings>();
     }
 
     RotationSinger::RotationSinger(const RotationSinger &r1)
-            : id(r1.id), name(r1.name), position(r1.position), regular(r1.regular), addTs(r1.addTs), valid(r1.valid) {
+            : id(r1.id), name(r1.name), position(r1.position), regular(r1.regular), addTs(r1.addTs), valid(r1.valid),
+              paused(r1.paused) {
         m_logger = spdlog::get("logger");
         m_settings = std::make_shared<Settings>();
     }

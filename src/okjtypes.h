@@ -67,11 +67,17 @@ namespace okj {
         bool regular{false};
         QDateTime addTs;
         bool valid{true};
+        // "Stepped away" - keeps the singer in the rotation and keeps their
+        // queue intact, but automatic rotation advancement passes over them and
+        // they stop contributing to everyone else's wait estimate. The KJ can
+        // still start them explicitly.
+        bool paused{false};
         std::shared_ptr<spdlog::logger> m_logger;
         std::shared_ptr<Settings> m_settings;
         [[nodiscard]] std::string loggingPrefix() const { return "[RotationSinger] [" + name.toStdString() + "]"; }
         RotationSinger();
-        RotationSinger(int id, QString name, int position, bool regular, QDateTime addTs, bool valid = true);
+        RotationSinger(int id, QString name, int position, bool regular, QDateTime addTs, bool valid = true,
+                       bool paused = false);
         RotationSinger(const RotationSinger &r1);
         RotationSinger(RotationSinger &&other) = default;
         RotationSinger& operator=(RotationSinger&& other) = default;

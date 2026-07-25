@@ -222,7 +222,8 @@ void MainWindow::setupShortcuts() {
                     curPos = 0;
                 }
                 nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                nextSongPath = nextSinger.nextSongPath();
+                if (!nextSinger.paused)
+                    nextSongPath = nextSinger.nextSongPath();
                 loops++;
             }
         }
@@ -275,7 +276,8 @@ void MainWindow::setupShortcuts() {
                     curPos = 0;
                 }
                 nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                nextSongPath = nextSinger.nextSongPath();
+                if (!nextSinger.paused)
+                    nextSongPath = nextSinger.nextSongPath();
                 loops++;
             }
         }
@@ -1402,6 +1404,12 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
                            singersQuery.value("name").toString().toStdString());
         }
     }
+    if (schemaVersion < 107) {
+        m_logger->info("{} Updating database schema to version 107", m_loggingPrefix);
+        query.exec("ALTER TABLE rotationSingers ADD COLUMN paused LOGICAL DEFAULT(0)");
+        query.exec("PRAGMA user_version = 107");
+        m_logger->info("{} DB Schema update to v107 completed", m_loggingPrefix);
+    }
 }
 
 
@@ -2130,7 +2138,7 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
                             curPos = 0;
                         }
                         nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                        if (nextSinger.id != curSingerId || loops >= otherSingers)
+                        if ((nextSinger.id != curSingerId || loops >= otherSingers) && !nextSinger.paused)
                             nextSongPath = nextSinger.nextSongPath();
                         loops++;
                     }
@@ -2354,6 +2362,12 @@ void MainWindow::tableViewRotationContextMenuRequested(const QPoint &pos) {
             contextMenu.addAction("Rename", this, &MainWindow::renameSinger);
             contextMenu.addAction("Set as top of rotation", [&]() {
                 m_rotModel.setRotationTopSingerId(m_rtClickRotationSingerId);
+            });
+            // Singers can set this from their phone, but the KJ needs to be able
+            // to undo it when someone marks themselves away and then vanishes.
+            const bool paused = m_rotModel.getSinger(m_rtClickRotationSingerId).paused;
+            contextMenu.addAction(paused ? "Mark as back" : "Mark as stepped away", [&, paused]() {
+                m_rotModel.singerSetPaused(m_rtClickRotationSingerId, !paused);
             });
         }
         contextMenu.exec(QCursor::pos());
@@ -4595,7 +4609,7 @@ void MainWindow::startAutoPlayIfIdle() {
             if (++curPos >= m_rotModel.singerCount())
                 curPos = 0;
             nextSinger = m_rotModel.getSingerAtPosition(curPos);
-            if (nextSinger.id != curSingerId || loops >= otherSingers)
+            if ((nextSinger.id != curSingerId || loops >= otherSingers) && !nextSinger.paused)
                 nextSongPath = nextSinger.nextSongPath();
             loops++;
         }

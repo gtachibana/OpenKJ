@@ -81,8 +81,12 @@ QVariant TableModelRotation::data(const QModelIndex &index, int role) const {
     if (!index.isValid())
         return {};
     switch (role) {
-        case Qt::FontRole:
-            return m_settings.applicationFont();
+        case Qt::FontRole: {
+            auto font = m_settings.applicationFont();
+            if (m_singers.at(index.row()).paused)
+                font.setItalic(true);
+            return font;
+        }
         case Qt::ToolTipRole:
             return getTooltipData(index);
         case Qt::UserRole:
@@ -210,7 +214,7 @@ void TableModelRotation::loadData() {
     emit layoutAboutToBeChanged();
     m_singers.clear();
     QSqlQuery query;
-    query.exec("SELECT singerid,name,position,regular,addts FROM rotationsingers ORDER BY position");
+    query.exec("SELECT singerid,name,position,regular,addts,COALESCE(paused,0) FROM rotationsingers ORDER BY position");
     if (auto sqlError = query.lastError(); sqlError.type() != QSqlError::NoError)
         m_logger->error("{} TableModelRotation - SQL error on load: {}", m_loggingPrefix,
                         sqlError.text());
@@ -220,7 +224,9 @@ void TableModelRotation::loadData() {
                 query.value(1).toString(),
                 query.value(2).toInt(),
                 query.value(3).toBool(),
-                query.value(4).toDateTime()
+                query.value(4).toDateTime(),
+                true,
+                query.value(5).toBool()
         });
     }
     emit layoutChanged();
@@ -235,8 +241,10 @@ void TableModelRotation::commitChanges() {
     QSqlQuery query;
     query.exec("BEGIN TRANSACTION");
     query.exec("DELETE FROM rotationsingers");
+    // Note this rewrites every row from memory, so any column added to
+    // rotationsingers has to be bound here too or it gets wiped on every commit.
     query.prepare(
-            "INSERT INTO rotationsingers (singerid,name,position,regular,regularid,addts) VALUES(:singerid,:name,:pos,:regular,:regularid,:addts)");
+            "INSERT INTO rotationsingers (singerid,name,position,regular,regularid,addts,paused) VALUES(:singerid,:name,:pos,:regular,:regularid,:addts,:paused)");
     for (const auto &singer: m_singers) {
         query.bindValue(":singerid", singer.id);
         query.bindValue(":name", singer.name);
@@ -244,6 +252,7 @@ void TableModelRotation::commitChanges() {
         query.bindValue(":regular", singer.regular);
         query.bindValue(":regularid", -1);
         query.bindValue(":addts", singer.addTs);
+        query.bindValue(":paused", singer.paused);
         query.exec();
     }
     query.exec("COMMIT");
@@ -478,6 +487,27 @@ bool TableModelRotation::singerExists(const QString &name) const {
         return (name.toLower() == singer.name.toLower());
     });
     return (it != m_singers.end());
+}
+
+void TableModelRotation::singerSetPaused(const int singerId, const bool paused) {
+    auto it = std::find_if(m_singers.begin(), m_singers.end(), [&singerId](okj::RotationSinger &singer) {
+        return (singerId == singer.id);
+    });
+    if (it == m_singers.end())
+        return;
+    it->paused = paused;
+    emit dataChanged(this->index(it->position, COL_NAME), this->index(it->position, COL_NEXT_SONG),
+                     QVector<int>{Qt::DisplayRole, Qt::FontRole});
+    QSqlQuery query;
+    query.prepare("UPDATE rotationsingers SET paused = :paused WHERE singerid = :singerid");
+    query.bindValue(":paused", paused);
+    query.bindValue(":singerid", singerId);
+    query.exec();
+    if (auto lastError = query.lastError(); lastError.type() != QSqlError::NoError) {
+        m_logger->error("{} DB error! Unable to write rotation changes to db on disk! Error: {}", m_loggingPrefix,
+                        lastError.text());
+    }
+    emit rotationModified();
 }
 
 void TableModelRotation::singerSetRegular(const int singerId, const bool isRegular) {
