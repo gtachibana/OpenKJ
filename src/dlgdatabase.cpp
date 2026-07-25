@@ -26,6 +26,7 @@
 #include <QSqlQuery>
 #include <QMessageBox>
 #include "dbupdater.h"
+#include "libraryreorganizer.h"
 #include <QStandardPaths>
 
 DlgDatabase::DlgDatabase(TableModelKaraokeSongs &dbModel, QWidget *parent) :
@@ -248,6 +249,113 @@ void DlgDatabase::on_btnCustomPatterns_clicked()
     customPatternsDlg->show();
 }
 
+void DlgDatabase::setDirectoryMonitorEnabled(bool enabled)
+{
+    if (enabled) {
+        if (!m_directoryMonitor && m_settings.dbDirectoryWatchEnabled()) {
+            m_directoryMonitor = new DirectoryMonitor(this, sourcedirmodel->getSourceDirs());
+            connect(m_directoryMonitor, &DirectoryMonitor::databaseUpdateComplete, this, &DlgDatabase::databaseUpdateComplete);
+        }
+    }
+    else {
+        delete m_directoryMonitor;
+        m_directoryMonitor = nullptr;
+    }
+}
+
+void DlgDatabase::on_btnReorganize_clicked()
+{
+    const int index = ui->tableViewFolders->currentIndex().row();
+    if (index < 0)
+        return;
+    const QString sourceDir = sourcedirmodel->getDirByIndex(index).getPath();
+
+    bool okPressed = false;
+    const QString byArtist = tr("Artist initial (usually the more even spread)");
+    const QString byFilename = tr("Filename initial");
+    const QString selected = QInputDialog::getItem(
+            this, tr("Reorganize folder"),
+            tr("Group the loose files in\n%1\ninto subfolders by:").arg(sourceDir),
+            QStringList() << byArtist << byFilename, 0, false, &okPressed);
+    if (!okPressed)
+        return;
+    const auto scheme = (selected == byFilename) ? LibraryReorganizer::Scheme::FilenameInitial
+                                                 : LibraryReorganizer::Scheme::ArtistInitial;
+
+    LibraryReorganizer reorganizer;
+    connect(&reorganizer, &LibraryReorganizer::progressMessage, dbUpdateDlg, &DlgDbUpdate::addLogMsg);
+    connect(&reorganizer, &LibraryReorganizer::stateChanged, dbUpdateDlg, &DlgDbUpdate::changeStatusTxt);
+    connect(&reorganizer, &LibraryReorganizer::progressChanged, dbUpdateDlg, &DlgDbUpdate::changeProgress);
+
+    dbUpdateDlg->reset();
+    dbUpdateDlg->show();
+    QApplication::processEvents();
+    const auto plan = reorganizer.plan(sourceDir, scheme);
+    dbUpdateDlg->hide();
+
+    if (plan.isEmpty()) {
+        QMessageBox::information(this, tr("Nothing to do"),
+                                 tr("No loose karaoke files were found in the top level of this folder."));
+        return;
+    }
+
+    QStringList distributionLines;
+    for (auto it = plan.distribution.constBegin(); it != plan.distribution.constEnd(); ++it)
+        distributionLines << QString("%1:  %2").arg(it.key(), QString::number(it.value()));
+    if (!plan.skipped.isEmpty())
+        distributionLines << "" << tr("Skipped:") << plan.skipped;
+
+    QMessageBox confirm;
+    confirm.setText(tr("Reorganize %1 songs?").arg(plan.moves.size()));
+    confirm.setInformativeText(
+            tr("%1 files will be moved into %2 subfolders of\n%3\n\n"
+               "Largest subfolder: %4 songs.\nSkipped: %5.\n\n"
+               "The database will be updated to match. Nothing is deleted, and every move is "
+               "recorded to a CSV in the OpenKJ data folder.\n\n"
+               "Back up your library before running this the first time.")
+                    .arg(plan.fileCount())
+                    .arg(plan.distribution.size())
+                    .arg(plan.sourceDir)
+                    .arg(plan.largestBucket())
+                    .arg(plan.skipped.size()));
+    confirm.setDetailedText(distributionLines.join("\n"));
+    confirm.setIcon(QMessageBox::Question);
+    confirm.addButton(QMessageBox::Cancel);
+    QPushButton *goButton = confirm.addButton(tr("Reorganize"), QMessageBox::AcceptRole);
+    confirm.exec();
+    if (confirm.clickedButton() != goButton)
+        return;
+
+    // The watcher would otherwise fire a full rescan of the folder we are busy
+    // emptying, repeatedly, while we work.
+    setDirectoryMonitorEnabled(false);
+
+    dbUpdateDlg->reset();
+    dbUpdateDlg->show();
+    QApplication::processEvents();
+    const bool ok = reorganizer.execute(plan);
+    dbUpdateDlg->hide();
+
+    setDirectoryMonitorEnabled(true);
+    emit databaseUpdateComplete();
+
+    if (!ok) {
+        QMessageBox msgBox;
+        msgBox.setText(tr("Reorganize finished with errors"));
+        msgBox.setInformativeText(tr("Some songs could not be moved and were left where they were. "
+                                     "The moves that did succeed are listed in:\n%1").arg(reorganizer.journalPath()));
+        msgBox.setDetailedText(reorganizer.errors().join("\n"));
+        msgBox.setIcon(QMessageBox::Warning);
+        msgBox.exec();
+        return;
+    }
+
+    QMessageBox::information(this, tr("Reorganize complete"),
+                             tr("Moved %1 songs.\n\nA record of every move was written to:\n%2")
+                                     .arg(plan.moves.size())
+                                     .arg(reorganizer.journalPath()));
+}
+
 void DlgDatabase::on_btnExport_clicked()
 {
     QString defaultFilePath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + QDir::separator() + "dbexport.csv";
@@ -292,6 +400,7 @@ void DlgDatabase::updateButtonsState()
     bool hasSelectedRow = ui->tableViewFolders->selectionModel()->selectedRows().count() > 0;
     ui->buttonUpdate->setEnabled(hasSelectedRow);
     ui->buttonDelete->setEnabled(hasSelectedRow);
+    ui->btnReorganize->setEnabled(hasSelectedRow);
 
     auto model = ui->tableViewFolders->model();
     ui->buttonUpdateAll->setEnabled(model && model->rowCount() > 0);

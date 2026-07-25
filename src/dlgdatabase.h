@@ -51,6 +51,7 @@ private:
 
     void scan(bool scanAllPaths);
     void updateButtonsState();
+    void setDirectoryMonitorEnabled(bool enabled);
 
 public:
     explicit DlgDatabase(TableModelKaraokeSongs &dbModel, QWidget *parent = nullptr);
@@ -74,6 +75,7 @@ private slots:
     void on_btnClearDatabase_clicked();
     static void showDbUpdateErrors(const QStringList& errors);
     void on_btnCustomPatterns_clicked();
+    void on_btnReorganize_clicked();
     void on_btnExport_clicked();
     void on_foldersSelectionChanged(const QItemSelection &selected, const QItemSelection &deselected);
 };

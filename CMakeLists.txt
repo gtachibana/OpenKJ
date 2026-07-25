@@ -425,6 +425,7 @@ set(SOURCE_FILES
         src/mainwindow.cpp
         src/dbupdater.cpp
         src/directorymonitor.cpp
+        src/libraryreorganizer.cpp
         src/dlgkeychange.cpp
         src/dlgdatabase.cpp
         src/dlgrequests.cpp
@@ -487,6 +488,7 @@ set(SOURCE_FILES
         src/okjtypes.h
         src/dbupdater.h
         src/directorymonitor.h
+        src/libraryreorganizer.h
         src/dlgkeychange.h
         src/dlgdatabase.h
         src/dlgrequests.h
