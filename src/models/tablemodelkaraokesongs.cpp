@@ -13,6 +13,32 @@
 
 #include "okjfmt.h"
 
+namespace {
+
+    // Normalizes a stored field into the form the search needles are matched
+    // against. The contains() guards keep QString's implicit sharing intact for
+    // the common case, so songs without an '&' or apostrophe don't allocate.
+    QString normalizeHaystack(const QString &src, bool ignoreApos) {
+        QString s = src.toLower();
+        if (s.contains('&'))
+            s.replace('&', " and ");
+        if (ignoreApos && s.contains('\''))
+            s.remove('\'');
+        return s;
+    }
+
+    // Normalizes the user's query into whitespace-separated needles.
+    QString normalizeNeedles(const QString &raw, bool ignoreApos) {
+        QString s = raw.toLower();
+        s.replace(',', ' ');
+        s.replace('&', " and ");
+        if (ignoreApos)
+            s.replace('\'', ' ');
+        return s;
+    }
+
+}
+
 TableModelKaraokeSongs::TableModelKaraokeSongs(QObject *parent)
         : QAbstractTableModel(parent) {
     m_logger = spdlog::get("logger");
@@ -171,12 +197,19 @@ void TableModelKaraokeSongs::loadData() {
     emit layoutAboutToBeChanged();
     m_allSongs.clear();
     m_filteredSongs.clear();
+    const bool ignoreApos = m_settings.ignoreAposInSearch();
     QSqlQuery query;
+    // SQLite forward-only queries always report size() as -1, so the row count
+    // has to come from a separate query. Worth it: without a reserve, loading a
+    // 100k+ song library repeatedly reallocates both vectors.
+    if (query.exec("SELECT COUNT(*) FROM dbsongs") && query.next()) {
+        const auto rows = static_cast<size_t>(query.value(0).toLongLong());
+        m_allSongs.reserve(rows);
+        m_filteredSongs.reserve(rows);
+    }
     query.exec("SELECT songid,artist,title,discid,duration,filename,path,searchstring,plays,lastplay FROM dbsongs");
-    if (query.size() > 0)
-        m_filteredSongs.reserve(query.size());
     while (query.next()) {
-        auto song = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(okj::KaraokeSong{
+        const auto &song = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(okj::KaraokeSong{
                 query.value(0).toInt(),
                 query.value(1).toString(),
                 query.value(1).toString().toLower(),
@@ -193,10 +226,13 @@ void TableModelKaraokeSongs::loadData() {
                 (query.value(3).toString() == "!!BAD!!"),
                 (query.value(3).toString() == "!!DROPPED!!")
         }));
+        setSearchHaystacks(*song, ignoreApos);
     }
+    m_haystacksIgnoreApos = ignoreApos;
     rebuildPathHash();
     m_logger->info("{} Loaded {} karaoke songs from the db on disk", m_loggingPrefix, m_allSongs.size());
-    search(m_lastSearch);
+    invalidateSearchNarrowing();
+    requestSearch();
     emit layoutChanged();
 }
 
@@ -206,9 +242,13 @@ void TableModelKaraokeSongs::loadDataFrom(const TableModelKaraokeSongs &source) 
     emit layoutAboutToBeChanged();
     m_allSongs = source.m_allSongs;
     m_filteredSongs.clear();
+    // The songs are shared by pointer with the source model, so their haystacks
+    // are already built - just inherit which apostrophe mode they were built for.
+    m_haystacksIgnoreApos = source.m_haystacksIgnoreApos;
     rebuildPathHash();
     m_logger->info("{} Loaded {} karaoke songs shared from the primary model", m_loggingPrefix, m_allSongs.size());
-    search(m_lastSearch);
+    invalidateSearchNarrowing();
+    requestSearch();
     emit layoutChanged();
 }
 
@@ -220,75 +260,100 @@ void TableModelKaraokeSongs::rebuildPathHash() {
 }
 
 void TableModelKaraokeSongs::search(const QString &searchString) {
-    m_lastSearch = searchString.toLower();
-    m_lastSearch.replace(',', ' ');
-    m_lastSearch.replace('&', " and ");
-    if (m_settings.ignoreAposInSearch())
-        m_lastSearch.replace('\'', ' ');
+    m_lastSearchRaw = searchString;
+    m_lastSearch = normalizeNeedles(searchString, m_settings.ignoreAposInSearch());
+    requestSearch();
+}
+
+void TableModelKaraokeSongs::requestSearch() {
     if (searchTimer.isActive())
         searchTimer.stop();
     searchTimer.start(100);
 }
 
+// Anything that reorders, adds to, or removes from m_allSongs - or changes
+// which field is searched - breaks the assumption that m_filteredSongs is a
+// superset of the next result, so the next search has to be a full scan.
+void TableModelKaraokeSongs::invalidateSearchNarrowing() {
+    m_canNarrowSearch = false;
+}
+
+void TableModelKaraokeSongs::setSearchHaystacks(okj::KaraokeSong &song, bool ignoreApos) {
+    song.searchAll = normalizeHaystack(song.searchString, ignoreApos);
+    song.searchArtist = normalizeHaystack(song.artistL, ignoreApos);
+    song.searchTitle = normalizeHaystack(song.titleL, ignoreApos);
+}
+
+void TableModelKaraokeSongs::rebuildSearchHaystacks(bool ignoreApos) {
+    for (const auto &song : m_allSongs)
+        setSearchHaystacks(*song, ignoreApos);
+    m_haystacksIgnoreApos = ignoreApos;
+}
+
+const QString &TableModelKaraokeSongs::searchHaystack(const okj::KaraokeSong &song) const {
+    switch (m_searchType) {
+        case SEARCH_TYPE_ARTIST:
+            return song.searchArtist;
+        case SEARCH_TYPE_TITLE:
+            return song.searchTitle;
+        case SEARCH_TYPE_ALL:
+        default:
+            return song.searchAll;
+    }
+}
+
 void TableModelKaraokeSongs::searchExec() {
     searchTimer.stop();
-    emit layoutAboutToBeChanged();
-    std::vector<std::string> searchTerms;
-    std::string s = m_lastSearch.toLower().toStdString();
-    std::string::size_type prev_pos = 0, pos = 0;
-    while ((pos = s.find(' ', pos)) != std::string::npos) {
-        searchTerms.emplace_back(s.substr(prev_pos, pos - prev_pos));
-        prev_pos = ++pos;
+
+    // The haystacks bake in the apostrophe setting, so pick up a change to it.
+    if (const bool ignoreApos = m_settings.ignoreAposInSearch(); ignoreApos != m_haystacksIgnoreApos) {
+        rebuildSearchHaystacks(ignoreApos);
+        m_lastSearch = normalizeNeedles(m_lastSearchRaw, ignoreApos);
+        invalidateSearchNarrowing();
     }
-    searchTerms.emplace_back(s.substr(prev_pos, pos - prev_pos));
-    m_filteredSongs.clear();
-    m_filteredSongs.reserve(m_allSongs.size());
-#if QT_VERSION < QT_VERSION_CHECK(5, 15, 0)
-    auto needles = m_lastSearch.split(' ', QString::SplitBehavior::SkipEmptyParts);
-#else
-    auto needles = m_lastSearch.split(' ', Qt::SplitBehavior(Qt::SkipEmptyParts));
-#endif
-    for (const auto &song : m_allSongs) {
+
+    const auto needles = m_lastSearch.split(' ', Qt::SkipEmptyParts);
+
+    // When the query merely extends the previous one - the usual case while
+    // typing - every song that matches it also matched the previous query, so
+    // the previous results can be narrowed instead of rescanning the library.
+    const bool narrow = m_canNarrowSearch && m_lastSearch.startsWith(m_lastExecutedSearch);
+    const auto &candidates = narrow ? m_filteredSongs : m_allSongs;
+
+    std::vector<std::shared_ptr<okj::KaraokeSong>> results;
+    results.reserve(candidates.size());
+    for (const auto &song : candidates) {
         if (song->dropped)
             continue;
         if (song->bad)
             continue;
-        QString haystack;
-        switch (m_searchType) {
-            case TableModelKaraokeSongs::SEARCH_TYPE_ALL: {
-                haystack = song->searchString;
-                break;
-            }
-            case TableModelKaraokeSongs::SEARCH_TYPE_ARTIST: {
-                haystack = song->artistL.replace('&', " and ");
-                break;
-            }
-            case TableModelKaraokeSongs::SEARCH_TYPE_TITLE: {
-                haystack = song->titleL.replace('&', " and ");
-                break;
-            }
-        }
-        if (m_settings.ignoreAposInSearch())
-            haystack.remove('\'');
+        const QString &haystack = searchHaystack(*song);
         bool match{true};
         for (const auto &needle : needles) {
             if (!haystack.contains(needle)) {
                 match = false;
-                continue;
+                break;
             }
         }
         if (match)
-            m_filteredSongs.emplace_back(song);
+            results.emplace_back(song);
     }
-    m_filteredSongs.shrink_to_fit();
+    results.shrink_to_fit();
+
+    emit layoutAboutToBeChanged();
+    m_filteredSongs = std::move(results);
     emit layoutChanged();
+
+    m_lastExecutedSearch = m_lastSearch;
+    m_canNarrowSearch = true;
 }
 
 void TableModelKaraokeSongs::setSearchType(TableModelKaraokeSongs::SearchType type) {
     if (m_searchType == type)
         return;
     m_searchType = type;
-    search(m_lastSearch);
+    invalidateSearchNarrowing();
+    requestSearch();
 }
 
 int TableModelKaraokeSongs::getIdForPath(const QString &path) {
@@ -425,7 +490,8 @@ void TableModelKaraokeSongs::sort(int column, Qt::SortOrder order) {
         std::sort(m_allSongs.rbegin(), m_allSongs.rend(), sortLambda);
     }
     QApplication::restoreOverrideCursor();
-    search(m_lastSearch);
+    invalidateSearchNarrowing();
+    requestSearch();
 }
 
 void TableModelKaraokeSongs::setSongDurations(const QVector<QPair<QString, int>> &durations) {
@@ -459,6 +525,7 @@ void TableModelKaraokeSongs::markSongBad(QString path) {
                                          });
     if (songEntry != m_allSongs.end())
         songEntry->get()->bad = true;
+    invalidateSearchNarrowing();
 }
 
 TableModelKaraokeSongs::DeleteStatus TableModelKaraokeSongs::removeBadSong(QString path) {
@@ -489,6 +556,7 @@ TableModelKaraokeSongs::DeleteStatus TableModelKaraokeSongs::removeBadSong(QStri
                                              });
         m_allSongs.erase(newAllSongsEnd, m_allSongs.end());
         m_songsByPath.remove(path);
+        invalidateSearchNarrowing();
 
         if (isCdg) {
             if (!QFile::remove(mediaFile)) {
@@ -555,8 +623,10 @@ int TableModelKaraokeSongs::addSong(okj::KaraokeSong song) {
         int lastInsertId = query.lastInsertId().toInt();
         song.id = lastInsertId;
         auto newSong = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(song));
+        setSearchHaystacks(*newSong, m_haystacksIgnoreApos);
         m_songsByPath.insert(newSong->path, newSong);
-        search(m_lastSearch);
+        invalidateSearchNarrowing();
+        requestSearch();
         return lastInsertId;
     }
 }

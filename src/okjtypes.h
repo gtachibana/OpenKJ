@@ -46,6 +46,12 @@ namespace okj {
         QDateTime lastPlay;
         bool bad{false};
         bool dropped{false};
+        // Fully normalized copies of the fields above, used as the needle
+        // haystacks by TableModelKaraokeSongs. Built once when the song is
+        // loaded rather than per-search - see setSearchHaystacks().
+        QString searchAll;
+        QString searchArtist;
+        QString searchTitle;
     };
 
     struct HistorySinger {
