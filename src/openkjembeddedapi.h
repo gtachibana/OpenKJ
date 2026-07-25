@@ -95,6 +95,10 @@ private:
     QJsonObject currentAdmin(const QUrlQuery &query);
     QJsonObject requestSongFromLocalUser(const QJsonObject &payload);
     QJsonObject removeOwnRequest(const QJsonObject &payload);
+    QJsonObject listUserFavorites(const QUrlQuery &query);
+    QJsonObject addUserFavorite(const QJsonObject &payload);
+    QJsonObject removeUserFavorite(const QJsonObject &payload);
+    QJsonObject listUserHistory(const QUrlQuery &query);
     QJsonObject runAdminActionRest(const QJsonObject &payload);
     bool recordRequestOwner(int requestId, const QString &normalizedUsername);
     QString requestOwner(int requestId) const;

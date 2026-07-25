@@ -1315,6 +1315,8 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
             "CREATE TABLE IF NOT EXISTS local_request_owners ( request_id INTEGER PRIMARY KEY, username_normalized TEXT NOT NULL)");
     query.exec(
             "CREATE TABLE IF NOT EXISTS local_event_settings ( settings_id INTEGER PRIMARY KEY CHECK(settings_id = 1), app_name TEXT NOT NULL DEFAULT 'OpenKJ', tagline TEXT NOT NULL DEFAULT '')");
+    query.exec(
+            "CREATE TABLE IF NOT EXISTS local_user_favorites ( username_normalized TEXT NOT NULL, song_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (username_normalized, song_id))");
     query.exec("INSERT OR IGNORE INTO local_event_settings (settings_id, app_name, tagline) VALUES (1, 'OpenKJ', '')");
     query.exec("PRAGMA synchronous=OFF");
     query.exec("PRAGMA cache_size=300000");
