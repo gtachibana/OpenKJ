@@ -1428,6 +1428,22 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
         query.exec("PRAGMA user_version = 108");
         m_logger->info("{} DB Schema update to v108 completed", m_loggingPrefix);
     }
+    if (schemaVersion < 109) {
+        m_logger->info("{} Updating database schema to version 109", m_loggingPrefix);
+        // The embedded API sorts every song list by artist then title. artist and title
+        // are already declared COLLATE NOCASE, so this index satisfies those ORDER BYs
+        // directly and SQLite no longer has to sort every match into a temp B-tree.
+        // Requires the queries to drop the upper() wrappers, which made the sort key an
+        // expression no index could match.
+        query.exec("CREATE INDEX IF NOT EXISTS idx_dbsongs_artist_title ON dbsongs(artist, title)");
+        // Browse-by-letter used to compensate for untrimmed values with upper(trim(col)),
+        // which also defeated the index. Normalizing the stored values instead lets the
+        // predicate be a plain prefix LIKE, which SQLite turns into a range seek.
+        query.exec("UPDATE dbsongs SET artist = trim(artist), title = trim(title) "
+                   "WHERE artist <> trim(artist) OR title <> trim(title)");
+        query.exec("PRAGMA user_version = 109");
+        m_logger->info("{} DB Schema update to v109 completed", m_loggingPrefix);
+    }
 }
 
 
@@ -2679,8 +2695,9 @@ void MainWindow::editSong(const std::shared_ptr<okj::KaraokeSong>& song) {
         m_logger->info("{} New filename: {}", m_loggingPrefix, newFn.toStdString());
         query.prepare(
                 "UPDATE dbsongs SET artist = :artist, title = :title, discid = :songid, path = :path, filename = :filename, searchstring = :searchstring WHERE songid = :rowid");
-        QString newArtist = dlg.artist();
-        QString newTitle = dlg.title();
+        // Trimmed to keep browse-by-letter's prefix LIKE working - see dbInit() v109.
+        QString newArtist = dlg.artist().trimmed();
+        QString newTitle = dlg.title().trimmed();
         QString newSongId = dlg.songId();
         QString newPath = QFileInfo(song->path).absoluteDir().absolutePath() + "/" + newFn;
         QString newSearchString =
@@ -2713,8 +2730,9 @@ void MainWindow::editSong(const std::shared_ptr<okj::KaraokeSong>& song) {
     } else {
         query.prepare(
                 "UPDATE dbsongs SET artist = :artist, title = :title, discid = :songid, searchstring = :searchstring WHERE songid = :rowid");
-        QString newArtist = dlg.artist();
-        QString newTitle = dlg.title();
+        // Trimmed to keep browse-by-letter's prefix LIKE working - see dbInit() v109.
+        QString newArtist = dlg.artist().trimmed();
+        QString newTitle = dlg.title().trimmed();
         QString newSongId = dlg.songId();
         QString newSearchString =
                 QFileInfo(song->path).completeBaseName() + " " + newArtist + " " + newTitle + " " + newSongId;

@@ -608,8 +608,9 @@ int TableModelKaraokeSongs::addSong(okj::KaraokeSong song) {
     query.prepare(
             "INSERT INTO dbSongs (discid,artist,title,path,duration,filename,searchstring) VALUES(:songid, :artist, :title, :path, :duration, :filename, :searchString)");
     query.bindValue(":songid", song.songid);
-    query.bindValue(":artist", song.artist);
-    query.bindValue(":title", song.title);
+    // Trimmed to keep browse-by-letter's prefix LIKE working - see MainWindow::dbInit() v109.
+    query.bindValue(":artist", song.artist.trimmed());
+    query.bindValue(":title", song.title.trimmed());
     query.bindValue(":path", song.path);
     query.bindValue(":duration", song.duration);
     query.bindValue(":filename", song.filename);

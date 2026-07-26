@@ -325,11 +325,16 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
         const QString primary = (by == "title") ? "title" : "artist";
         const QString secondary = (by == "title") ? "artist" : "title";
 
+        // artist and title are COLLATE NOCASE columns, so a bare prefix LIKE is already
+        // case-insensitive and - unlike upper(trim(col)) - SQLite can turn it into a range
+        // seek on idx_dbsongs_artist_title. Values are trimmed on ingest and by the v109
+        // migration, so dropping trim() here doesn't lose rows. Sorting on the bare
+        // columns keeps the same order while letting the index supply it.
         QSqlQuery query;
         query.prepare(QString("SELECT songid, artist, title, COALESCE(duration, 0) FROM dbsongs "
                               "WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
-                              "AND upper(trim(%1)) LIKE :prefix "
-                              "ORDER BY upper(%1), upper(%2) LIMIT :limit").arg(primary, secondary));
+                              "AND %1 LIKE :prefix "
+                              "ORDER BY %1, %2 LIMIT :limit").arg(primary, secondary));
         query.bindValue(":prefix", letter + "%");
         query.bindValue(":limit", limit);
 
@@ -511,11 +516,17 @@ QJsonObject OpenKJEmbeddedApi::commandSearch(const QJsonObject &payload)
     QString sql = "SELECT songid, artist, title, COALESCE(duration, 0) FROM dbsongs "
                   "WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' ";
     if (!terms.isEmpty()) {
+        // No lower() on the column: SQLite's LIKE is already case-insensitive for ASCII
+        // (and its lower() only folds ASCII anyway), so the wrapper only cost a function
+        // call per row. Terms are still bound lowercased below.
         for (int i = 0; i < terms.size(); ++i) {
-            sql += QString("AND lower(artist || ' ' || title) LIKE :term%1 ").arg(i);
+            sql += QString("AND (artist || ' ' || title) LIKE :term%1 ").arg(i);
         }
     }
-    sql += QString("ORDER BY upper(artist), upper(title) LIMIT %1").arg(limit);
+    // Sorting the bare NOCASE columns rather than upper() of them lets
+    // idx_dbsongs_artist_title supply the order, so SQLite can stop at LIMIT instead of
+    // materializing every match into a temp B-tree first.
+    sql += QString("ORDER BY artist, title LIMIT %1").arg(limit);
 
     query.prepare(sql);
     for (int i = 0; i < terms.size(); ++i) {
@@ -1312,7 +1323,7 @@ QJsonObject OpenKJEmbeddedApi::listUserFavorites(const QUrlQuery &query)
                    "JOIN dbsongs ds ON ds.songid = f.song_id "
                    "WHERE f.username_normalized = :username "
                    "AND ds.discid != '!!DROPPED!!' AND ds.discid != '!!BAD!!' "
-                   "ORDER BY upper(ds.artist), upper(ds.title)");
+                   "ORDER BY ds.artist, ds.title");
     select.bindValue(":username", normalized);
 
     QJsonArray songs;
