@@ -1470,6 +1470,19 @@ void Settings::setKaraokeAutoAdvance(bool enabled)
     emit karaokeAutoAdvanceChanged(enabled);
 }
 
+// when enabled, karaoke tracks are analyzed in the background and played back at a
+// matched loudness, so the KJ isn't riding the fader between differently mastered rips
+bool Settings::karaokeNormalizeLoudness()
+{
+    return settings->value("karaokeNormalizeLoudness", true).toBool();
+}
+
+void Settings::setKaraokeNormalizeLoudness(bool enabled)
+{
+    settings->setValue("karaokeNormalizeLoudness", enabled);
+    emit karaokeNormalizeLoudnessChanged(enabled);
+}
+
 // when enabled, adding a song to a queue while karaoke is idle starts the autoplay countdown
 bool Settings::karaokeAutoPlayFirstSong()
 {

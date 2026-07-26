@@ -55,6 +55,7 @@
 #include "dlgsongshop.h"
 #include "songshop.h"
 #include "durationlazyupdater.h"
+#include "gainlazyupdater.h"
 #include "dlgvideopreview.h"
 #include "openkjembeddedapi.h"
 #include "src/models/tablemodelhistorysongs.h"
@@ -156,6 +157,7 @@ private:
     QShortcut m_scutDeleteSong{nullptr};
     QShortcut m_scutDeletePlSong{nullptr};
     std::unique_ptr<LazyDurationUpdateController> m_lazyDurationUpdater;
+    std::unique_ptr<LazyGainUpdateController> m_lazyGainUpdater;
     std::unique_ptr<QTemporaryDir> m_mediaTempDir;
     std::shared_ptr<SongShop> m_songShop;
     std::unique_ptr<UpdateChecker> m_updateChecker;
@@ -165,6 +167,7 @@ private:
     std::mt19937_64 rng;
 
     void updateIcons();
+    void prioritizeGainAnalysisForQueue();
     void applyModernWidgetStyle();
     void refreshModeAwareLabels();
     void setupShortcuts();

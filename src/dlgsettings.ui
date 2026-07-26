@@ -116,6 +116,16 @@
                  </widget>
                 </item>
                 <item>
+                 <widget class="QCheckBox" name="checkBoxNormalizeLoudness">
+                  <property name="toolTip">
+                   <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Measures the loudness of each karaoke track in the background and plays them all back at a matched level, so you don't have to ride the fader between differently mastered discs. Analysis runs only while karaoke playback is stopped, songs waiting in the rotation first. Tracks that haven't been measured yet play at their original level.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+                  </property>
+                  <property name="text">
+                   <string>Normalize track loudness</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
                  <widget class="QGroupBox" name="groupBoxRecording">
                   <property name="title">
                    <string>Recording</string>

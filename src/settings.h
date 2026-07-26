@@ -222,6 +222,8 @@ public:
     int mplxMode();
     void setMplxMode(int mode);
     bool karaokeAutoAdvance();
+    bool karaokeNormalizeLoudness();
+    void setKaraokeNormalizeLoudness(bool enabled);
     bool karaokeAutoPlayFirstSong();
     void setKaraokeAutoPlayFirstSong(bool enabled);
     int karaokeAATimeout();
@@ -324,6 +326,7 @@ signals:
     void requestServerVenueChanged(int venueId);
     void mplxModeChanged(int mode);
     void karaokeAutoAdvanceChanged(bool enabled);
+    void karaokeNormalizeLoudnessChanged(bool enabled);
     void showQueueRemovalWarningChanged(bool enabled);
     void showSingerRemovalWarningChanged(bool enabled);
     void showSongInterruptionWarningChanged(bool enabled);
