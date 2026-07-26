@@ -19,6 +19,8 @@
 */
 
 #include <qglobal.h>
+#include <cmath>
+#include <limits>
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include <QMessageBox>
@@ -669,6 +671,9 @@ MainWindow::MainWindow(QWidget *parent) :
     m_songShop = std::make_unique<SongShop>(this);
     m_lazyDurationUpdater = std::make_unique<LazyDurationUpdateController>(this);
     m_lazyGainUpdater = std::make_unique<LazyGainUpdateController>(this);
+    // Wired here rather than in setupConnections(), which runs after the first
+    // getGains() call and would miss its initial progress report.
+    connectGainUpdater();
     ui->tableViewBmPlaylist->setMouseTracking(true);
     m_historyTabWidget = ui->tabWidgetQueue->widget(1);
     ui->actionShow_Debug_Log->setChecked(m_settings.logShow());
@@ -749,6 +754,8 @@ MainWindow::MainWindow(QWidget *parent) :
     cdgWindow = std::make_unique<DlgCdg>(m_mediaBackendKar, m_mediaBackendBm, nullptr, Qt::Window);
     ui->tableViewDB->hideColumn(TableModelKaraokeSongs::COL_ID);
     ui->tableViewDB->hideColumn(TableModelKaraokeSongs::COL_FILENAME);
+    // Only worth screen space when loudness leveling is actually on.
+    ui->tableViewDB->setColumnHidden(TableModelKaraokeSongs::COL_GAIN, !m_settings.karaokeNormalizeLoudness());
     ui->tableViewQueue->hideColumn(TableModelQueueSongs::COL_ID);
     ui->tableViewQueue->hideColumn(TableModelQueueSongs::COL_DBSONGID);
     if (!MediaBackend::canPitchShift()) {
@@ -762,9 +769,16 @@ MainWindow::MainWindow(QWidget *parent) :
     m_labelAppMode.setContentsMargins(4, 4, 4, 4);
     m_labelSingerCount.setContentsMargins(4, 4, 4, 4);
     m_labelRotationDuration.setContentsMargins(4, 4, 4, 4);
+    m_labelGainProgress.setContentsMargins(4, 4, 4, 4);
+    m_labelGainProgress.setToolTip("Progress of background loudness analysis. Only songs that have been\n"
+                                   "analyzed get leveled against the rest of the library.");
     ui->statusBar->addPermanentWidget(&m_labelAppMode);
     ui->statusBar->addWidget(&m_labelSingerCount);
     ui->statusBar->addWidget(&m_labelRotationDuration);
+    ui->statusBar->addWidget(&m_labelGainProgress);
+    // After addWidget(), which shows what it is given. Nothing to report until the
+    // first progress update arrives.
+    m_labelGainProgress.hide();
     m_tableModelPlaylists = std::make_unique<QSqlTableModel>(this, m_database);
     m_tableModelPlaylists->setTable("bmplaylists");
     m_tableModelPlaylists->sort(2, Qt::AscendingOrder);
@@ -1011,10 +1025,13 @@ void MainWindow::setupConnections() {
     connect(&m_timerKaraokeAA, &QTimer::timeout, this, &MainWindow::karaokeAATimerTimeout);
     connect(ui->actionAutoplay_mode, &QAction::toggled, &m_settings, &Settings::setKaraokeAutoAdvance);
     connect(&m_settings, &Settings::karaokeNormalizeLoudnessChanged, this, [&](bool enabled) {
-        if (enabled)
+        ui->tableViewDB->setColumnHidden(TableModelKaraokeSongs::COL_GAIN, !enabled);
+        if (enabled) {
             m_lazyGainUpdater->getGains();
-        else
+        } else {
             m_lazyGainUpdater->stopWork();
+            m_labelGainProgress.hide();
+        }
     });
 
 
@@ -1641,6 +1658,29 @@ void MainWindow::prioritizeGainAnalysisForQueue() {
     m_lazyGainUpdater->prioritize(paths);
 }
 
+void MainWindow::connectGainUpdater() {
+    connect(m_lazyGainUpdater.get(), &LazyGainUpdateController::gotGains, &m_karaokeSongsModel,
+            &TableModelKaraokeSongs::setSongGains);
+    connect(m_lazyGainUpdater.get(), &LazyGainUpdateController::progressChanged, this,
+            &MainWindow::updateGainProgress);
+}
+
+void MainWindow::updateGainProgress(const int analyzed, const int total) {
+    if (m_shuttingDown)
+        return;
+    // A sweep of a large library takes many sessions, so the label stays up while
+    // there is work left and disappears once everything has a value - at which point
+    // it would only be reporting that nothing is happening.
+    if (!m_settings.karaokeNormalizeLoudness() || total == 0 || analyzed >= total) {
+        m_labelGainProgress.hide();
+        return;
+    }
+    QLocale locale;
+    m_labelGainProgress.setText(QString("Loudness: %1 / %2")
+                                        .arg(locale.toString(analyzed), locale.toString(total)));
+    m_labelGainProgress.show();
+}
+
 void MainWindow::databaseUpdated() {
     m_karaokeSongsModel.loadData();
     search();
@@ -1656,6 +1696,7 @@ void MainWindow::databaseUpdated() {
     // them up rather than leaving them unanalyzed until the next launch.
     m_lazyGainUpdater->stopWork();
     m_lazyGainUpdater = std::make_unique<LazyGainUpdateController>(this);
+    connectGainUpdater();
     m_lazyGainUpdater->setPlaybackActive(m_mediaBackendKar.state() == MediaBackend::PlayingState);
     if (m_settings.karaokeNormalizeLoudness())
         m_lazyGainUpdater->getGains();
@@ -2411,6 +2452,21 @@ void MainWindow::tableViewDBContextMenuRequested(const QPoint &pos) {
         previewKaraokeSong(song->path);
     });
     contextMenu.addSeparator();
+    if (m_settings.karaokeNormalizeLoudness()) {
+        // Shown as a menu entry rather than only as a column so the measured value is
+        // visible even with the column hidden or scrolled off.
+        const QString gainText = std::isnan(song->gain)
+                                         ? QString("not analyzed yet")
+                                         : (std::fabs(song->gain) >= kGainSentinelThreshold
+                                                    ? QString("analysis failed")
+                                                    : QString::number(song->gain, 'f', 1) + " dB");
+        contextMenu.addAction("Loudness: " + gainText)->setEnabled(false);
+        contextMenu.addAction("Re-analyze loudness", [&]() {
+            m_karaokeSongsModel.setSongGains({{song->path, std::numeric_limits<double>::quiet_NaN()}});
+            m_lazyGainUpdater->reanalyze(song->path);
+        });
+        contextMenu.addSeparator();
+    }
     contextMenu.addAction("Edit", [&] () { editSong(song); });
     contextMenu.addAction("Mark bad", [&] () { markSongBad(song); });
     contextMenu.exec(QCursor::pos());

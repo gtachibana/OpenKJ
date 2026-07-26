@@ -10,7 +10,10 @@
 #include <QSvgRenderer>
 #include <QMimeData>
 #include <array>
+#include <cmath>
+#include <limits>
 
+#include "gainlazyupdater.h"
 #include "okjfmt.h"
 
 namespace {
@@ -76,6 +79,8 @@ QVariant TableModelKaraokeSongs::getColumnSizeHint(int section) const {
             return QSize(m_itemFontMetrics.size(Qt::TextSingleLine, "_10:00 10/00/00_PM").width(), m_itemHeight);
         case COL_SONGID:
             return QSize(m_itemFontMetrics.size(Qt::TextSingleLine, "XXXX0000000-01-00").width(), m_itemHeight);
+        case COL_GAIN:
+            return QSize(m_itemFontMetrics.size(Qt::TextSingleLine, "_-00.0 dB_").width(), m_itemHeight);
         case COL_ARTIST:
         case COL_TITLE:
         case COL_FILENAME:
@@ -102,6 +107,8 @@ QVariant TableModelKaraokeSongs::getColumnName(int section) {
             return "Plays";
         case COL_LASTPLAY:
             return "Last Played";
+        case COL_GAIN:
+            return "Gain";
         default:
             return {};
     }
@@ -112,7 +119,7 @@ int TableModelKaraokeSongs::rowCount([[maybe_unused]]const QModelIndex &parent) 
 }
 
 int TableModelKaraokeSongs::columnCount([[maybe_unused]]const QModelIndex &parent) const {
-    return 8;
+    return COL_GAIN + 1;
 }
 
 QVariant TableModelKaraokeSongs::data(const QModelIndex &index, int role) const {
@@ -158,6 +165,7 @@ QVariant TableModelKaraokeSongs::getColumnTextAlignmentHint(int column) {
         case COL_DURATION:
         case COL_PLAYS:
         case COL_LASTPLAY:
+        case COL_GAIN:
             return QVariant::fromValue(Qt::Alignment(Qt::AlignRight | Qt::AlignVCenter));
         default:
             return QVariant::fromValue(Qt::Alignment(Qt::AlignLeft | Qt::AlignVCenter));
@@ -188,9 +196,22 @@ QVariant TableModelKaraokeSongs::getItemDisplayData(const QModelIndex &index) co
             return m_filteredSongs.at(index.row())->lastPlay.toString(
                     locale.dateTimeFormat(QLocale::ShortFormat));
         }
+        case COL_GAIN:
+            return gainDisplayText(m_filteredSongs.at(index.row())->gain);
         default:
             return {};
     }
+}
+
+// Blank rather than a placeholder for the not-yet-analyzed case: on a large library
+// most of the column is empty for a long while, and a screen of em-dashes reads as
+// noise. "n/a" is reserved for files analysis actually gave up on.
+QString TableModelKaraokeSongs::gainDisplayText(const double gain) {
+    if (std::isnan(gain))
+        return {};
+    if (std::fabs(gain) >= kGainSentinelThreshold)
+        return "n/a";
+    return QString::number(gain, 'f', 1) + " dB";
 }
 
 void TableModelKaraokeSongs::loadData() {
@@ -207,7 +228,7 @@ void TableModelKaraokeSongs::loadData() {
         m_allSongs.reserve(rows);
         m_filteredSongs.reserve(rows);
     }
-    query.exec("SELECT songid,artist,title,discid,duration,filename,path,searchstring,plays,lastplay FROM dbsongs");
+    query.exec("SELECT songid,artist,title,discid,duration,filename,path,searchstring,plays,lastplay,gain FROM dbsongs");
     while (query.next()) {
         const auto &song = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(okj::KaraokeSong{
                 query.value(0).toInt(),
@@ -224,7 +245,11 @@ void TableModelKaraokeSongs::loadData() {
                 query.value(8).toInt(),
                 query.value(9).toDateTime(),
                 (query.value(3).toString() == "!!BAD!!"),
-                (query.value(3).toString() == "!!DROPPED!!")
+                (query.value(3).toString() == "!!DROPPED!!"),
+                // NULL means never analyzed, which the model shows as blank rather
+                // than as a gain of 0 dB - those are very different things.
+                query.value(10).isNull() ? std::numeric_limits<double>::quiet_NaN()
+                                         : query.value(10).toDouble()
         }));
         setSearchHaystacks(*song, ignoreApos);
     }
@@ -502,6 +527,17 @@ void TableModelKaraokeSongs::setSongDurations(const QVector<QPair<QString, int>>
     }
     if (!m_filteredSongs.empty())
         emit dataChanged(index(0, COL_DURATION), index(static_cast<int>(m_filteredSongs.size()) - 1, COL_DURATION),
+                         QVector<int>{Qt::DisplayRole});
+}
+
+void TableModelKaraokeSongs::setSongGains(const QVector<QPair<QString, double>> &gains) {
+    for (const auto &[path, gain] : gains) {
+        auto it = m_songsByPath.constFind(path);
+        if (it != m_songsByPath.constEnd())
+            it.value()->gain = gain;
+    }
+    if (!m_filteredSongs.empty())
+        emit dataChanged(index(0, COL_GAIN), index(static_cast<int>(m_filteredSongs.size()) - 1, COL_GAIN),
                          QVector<int>{Qt::DisplayRole});
 }
 

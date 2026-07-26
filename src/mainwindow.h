@@ -126,6 +126,7 @@ private:
     QLabel m_labelSingerCount;
     QLabel m_labelRotationDuration;
     QLabel m_labelAppMode;
+    QLabel m_labelGainProgress;
     QTimer m_timerKaraokeAA;
     QTimer m_timerSlowUiUpdate;
     QTimer m_timerTest;
@@ -168,6 +169,10 @@ private:
 
     void updateIcons();
     void prioritizeGainAnalysisForQueue();
+    // Connects a freshly constructed gain updater to the UI. Called on every
+    // construction, since databaseUpdated() replaces the controller wholesale.
+    void connectGainUpdater();
+    void updateGainProgress(int analyzed, int total);
     void applyModernWidgetStyle();
     void refreshModeAwareLabels();
     void setupShortcuts();

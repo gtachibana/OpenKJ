@@ -21,6 +21,8 @@
 #ifndef OPENKJ_OKJTYPES_H
 #define OPENKJ_OKJTYPES_H
 
+#include <limits>
+
 #include <QDateTime>
 #include <QString>
 #include <qmetatype.h>
@@ -46,6 +48,10 @@ namespace okj {
         QDateTime lastPlay;
         bool bad{false};
         bool dropped{false};
+        // ReplayGain track gain in dB, mirroring dbsongs.gain. NaN means the file
+        // has not been analyzed yet; the kGainAnalysisFailed sentinel means analysis
+        // ran and failed. See gainlazyupdater.h.
+        double gain{std::numeric_limits<double>::quiet_NaN()};
         // Fully normalized copies of the fields above, used as the needle
         // haystacks by TableModelKaraokeSongs. Built once when the song is
         // loaded rather than per-search - see setSearchHaystacks().

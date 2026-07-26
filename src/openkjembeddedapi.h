@@ -38,8 +38,34 @@ private:
         QByteArray body;
     };
 
+    // Per-socket read state. lastActivityMs is what the idle sweep uses to drop
+    // connections that opened and then went quiet - a phone that starts a request
+    // and sleeps mid-send would otherwise hold its socket and buffer forever.
+    struct Connection
+    {
+        QByteArray buffer;
+        qint64 lastActivityMs{0};
+    };
+
+    enum class ParseResult
+    {
+        Incomplete,
+        Complete,
+        Malformed,
+        HeaderTooLarge,
+        BodyTooLarge
+    };
+
+    // Failed-login bookkeeping for one peer address.
+    struct LoginThrottle
+    {
+        int failures{0};
+        qint64 windowStartMs{0};
+        qint64 lockedUntilMs{0};
+    };
+
     QTcpServer m_server;
-    QHash<QTcpSocket *, QByteArray> m_buffers;
+    QHash<QTcpSocket *, Connection> m_connections;
     TableModelRotation &m_rotationModel;
     TableModelQueueSongs &m_queueModel;
     Settings &m_settings;
@@ -49,18 +75,35 @@ private:
     QSet<QTcpSocket *> m_sseClients;
     QTimer m_sseBroadcastTimer;
     QTimer m_sseRefreshTimer;
+    QTimer m_idleSweepTimer;
     quint64 m_sseEventId{0};
+
+    // Peer address of the request currently being handled. The handlers are plain
+    // JSON-in/JSON-out functions with no socket access, and only the auth ones care
+    // who is calling; stashing it here beats threading it through every signature.
+    // Safe because handling is synchronous and single-threaded.
+    QString m_currentClientKey;
+    QHash<QString, LoginThrottle> m_loginThrottle;
 
     void onNewConnection();
     void onSocketReadyRead();
     void onSocketDisconnected();
+    void sweepIdleConnections();
 
     void beginEventStream(QTcpSocket *socket);
     void scheduleSseBroadcast();
     void broadcastSseSnapshot();
     void writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data);
 
-    bool tryParseHttpRequest(QByteArray &buffer, HttpRequest &request);
+    void sendErrorAndClose(QTcpSocket *socket, int statusCode, const QString &message);
+    // Rejects further login attempts from m_currentClientKey once it has failed too
+    // many times in a row. Applies to the shared admin password as much as to singer
+    // accounts - the admin password is the more valuable of the two to guess.
+    bool loginThrottled(int *retryAfterSecs);
+    void noteLoginFailure();
+    void clearLoginFailures();
+
+    ParseResult tryParseHttpRequest(QByteArray &buffer, HttpRequest &request);
     QByteArray handleRequest(const HttpRequest &request);
     QJsonObject handleApiCommand(const QJsonObject &payload);
     QByteArray handleLocalApiGet(const QString &path, const QUrlQuery &query);
@@ -93,7 +136,16 @@ private:
     QJsonObject buildEventSettings() const;
     bool ensureLocalModeSchema();
     static QString normalizeUsername(const QString &username);
-    static QByteArray hashPassword(const QString &password);
+    // Legacy scheme: a single unsalted SHA-256 pass. Only still here to verify
+    // accounts created before the PBKDF2 switch; those get upgraded on next login.
+    static QByteArray legacyHashPassword(const QString &password);
+    static QByteArray derivePassword(const QString &password, const QByteArray &salt, int iterations);
+    static QByteArray randomSalt();
+    static bool constantTimeEquals(const QByteArray &a, const QByteArray &b);
+    // Checks a password against the stored credential and, when it matched a legacy
+    // hash, rewrites the row in the current scheme so the weak hash stops existing.
+    bool verifyPassword(const QString &normalizedUsername, const QString &password);
+    bool storePassword(const QString &normalizedUsername, const QString &password);
     QString createUserSession(const QString &normalizedUsername);
     QString createAdminSession();
     bool isValidUserSession(const QString &token, QString *normalizedUsername = nullptr, QString *username = nullptr);

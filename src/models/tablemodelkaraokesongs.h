@@ -28,7 +28,9 @@ public:
         COL_FILENAME,
         COL_DURATION,
         COL_PLAYS,
-        COL_LASTPLAY
+        COL_LASTPLAY,
+        // Kept last so the saved column widths of existing installs still line up.
+        COL_GAIN
     };
     enum SearchType {
         SEARCH_TYPE_ALL=1,
@@ -97,10 +99,12 @@ private:
     [[nodiscard]] QVariant getColumnSizeHint(int section) const;
     [[nodiscard]] QVariant getItemDisplayData(const QModelIndex &index) const;
     [[nodiscard]] static QVariant getColumnTextAlignmentHint(int column) ;
+    [[nodiscard]] static QString gainDisplayText(double gain);
     [[nodiscard]] QVariant getColumnDecorationRole(const QModelIndex &index) const;
 
 public slots:
     void setSongDurations(const QVector<QPair<QString, int>> &durations);
+    void setSongGains(const QVector<QPair<QString, double>> &gains);
     void resizeIconsForFont(const QFont &font);
 
 };
