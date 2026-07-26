@@ -24,6 +24,22 @@ OpenKJEmbeddedApi::OpenKJEmbeddedApi(TableModelRotation &rotationModel,
       m_settings(settings)
 {
     connect(&m_server, &QTcpServer::newConnection, this, &OpenKJEmbeddedApi::onNewConnection);
+
+    // Rotation edits arrive in bursts (a drag reorder emits per row), so coalesce
+    // them into one snapshot instead of pushing a frame per signal.
+    m_sseBroadcastTimer.setSingleShot(true);
+    m_sseBroadcastTimer.setInterval(250);
+    connect(&m_sseBroadcastTimer, &QTimer::timeout, this, &OpenKJEmbeddedApi::broadcastSseSnapshot);
+
+    // Doubles as the keepalive: nothing signals us when a song's remaining time
+    // ticks down, so a periodic snapshot is what keeps wait_seconds honest.
+    m_sseRefreshTimer.setInterval(20000);
+    connect(&m_sseRefreshTimer, &QTimer::timeout, this, &OpenKJEmbeddedApi::broadcastSseSnapshot);
+
+    connect(&m_rotationModel, &TableModelRotation::rotationModified,
+            this, &OpenKJEmbeddedApi::scheduleSseBroadcast);
+    connect(&m_queueModel, &TableModelQueueSongs::queueModified,
+            this, [this](int) { scheduleSseBroadcast(); });
 }
 
 bool OpenKJEmbeddedApi::start(const quint16 port, const QHostAddress &address)
@@ -41,6 +57,10 @@ void OpenKJEmbeddedApi::stop()
     if (!m_server.isListening()) {
         return;
     }
+
+    m_sseBroadcastTimer.stop();
+    m_sseRefreshTimer.stop();
+    m_sseClients.clear();
 
     for (QTcpSocket *socket : m_buffers.keys()) {
         socket->disconnectFromHost();
@@ -69,9 +89,26 @@ void OpenKJEmbeddedApi::onSocketReadyRead()
     auto &buffer = m_buffers[socket];
     buffer.append(socket->readAll());
 
+    // An event-stream socket has nothing left to say; drop anything it sends so
+    // the buffer can't grow unbounded while we hold the connection open.
+    if (m_sseClients.contains(socket)) {
+        buffer.clear();
+        return;
+    }
+
     HttpRequest request;
     if (!tryParseHttpRequest(buffer, request)) {
         return;
+    }
+
+    if (request.method == "GET") {
+        QString cleanPath;
+        QUrlQuery query;
+        parseRequestPath(request.path, cleanPath, query);
+        if (cleanPath == "/local/events") {
+            beginEventStream(socket);
+            return;
+        }
     }
 
     const QByteArray response = handleRequest(request);
@@ -87,7 +124,91 @@ void OpenKJEmbeddedApi::onSocketDisconnected()
     }
 
     m_buffers.remove(socket);
+    m_sseClients.remove(socket);
+    if (m_sseClients.isEmpty()) {
+        m_sseRefreshTimer.stop();
+    }
     socket->deleteLater();
+}
+
+void OpenKJEmbeddedApi::beginEventStream(QTcpSocket *socket)
+{
+    QByteArray headers;
+    headers.append("HTTP/1.1 200 OK\r\n");
+    headers.append("Content-Type: text/event-stream; charset=utf-8\r\n");
+    headers.append("Cache-Control: no-cache, no-store\r\n");
+    headers.append("Connection: keep-alive\r\n");
+    // Keeps reverse proxies from buffering the stream into uselessness.
+    headers.append("X-Accel-Buffering: no\r\n");
+    headers.append("Access-Control-Allow-Origin: *\r\n");
+    headers.append("\r\n");
+    // How long EventSource should wait before reconnecting after a drop.
+    headers.append("retry: 3000\n\n");
+    socket->write(headers);
+
+    m_sseClients.insert(socket);
+    if (!m_sseRefreshTimer.isActive()) {
+        m_sseRefreshTimer.start();
+    }
+
+    // Send the current state immediately so a fresh subscriber doesn't have to
+    // wait for the next rotation change to render anything.
+    writeSseFrame(socket, "queue", QJsonDocument(buildQueueResponse()).toJson(QJsonDocument::Compact));
+}
+
+void OpenKJEmbeddedApi::scheduleSseBroadcast()
+{
+    if (m_sseClients.isEmpty()) {
+        return;
+    }
+    if (!m_sseBroadcastTimer.isActive()) {
+        m_sseBroadcastTimer.start();
+    }
+}
+
+void OpenKJEmbeddedApi::broadcastSseSnapshot()
+{
+    if (m_sseClients.isEmpty()) {
+        m_sseRefreshTimer.stop();
+        return;
+    }
+
+    ++m_sseEventId;
+    const QByteArray data = QJsonDocument(buildQueueResponse()).toJson(QJsonDocument::Compact);
+    const auto clients = m_sseClients;
+    for (QTcpSocket *socket : clients) {
+        writeSseFrame(socket, "queue", data);
+    }
+}
+
+void OpenKJEmbeddedApi::writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data)
+{
+    if (socket->state() != QAbstractSocket::ConnectedState) {
+        m_sseClients.remove(socket);
+        return;
+    }
+
+    // A client that stopped reading would otherwise let the write buffer grow
+    // without bound; cut it loose and let EventSource reconnect.
+    if (socket->bytesToWrite() > 1024 * 1024) {
+        m_sseClients.remove(socket);
+        socket->abort();
+        return;
+    }
+
+    QByteArray frame;
+    frame.append("id: ");
+    frame.append(QByteArray::number(m_sseEventId));
+    frame.append('\n');
+    frame.append("event: ");
+    frame.append(eventName);
+    frame.append('\n');
+    // Compact JSON never contains a raw newline, so a single data: line is safe.
+    frame.append("data: ");
+    frame.append(data);
+    frame.append("\n\n");
+    socket->write(frame);
+    socket->flush();
 }
 
 bool OpenKJEmbeddedApi::tryParseHttpRequest(QByteArray &buffer, HttpRequest &request)
@@ -175,7 +296,9 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
             return jsonResponse(400, out);
         }
 
-        return jsonResponse(200, handleApiCommand(doc.object()));
+        const QByteArray response = jsonResponse(200, handleApiCommand(doc.object()));
+        scheduleSseBroadcast();
+        return response;
     }
 
     if (request.method == "POST" && cleanPath == "/browse") {
@@ -236,7 +359,11 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
         if (!request.body.trimmed().isEmpty() && (parseError.error != QJsonParseError::NoError || !doc.isObject())) {
             return jsonResponse(400, QJsonObject{{"ok", false}, {"error", "Invalid JSON"}});
         }
-        return handleLocalApiPost(cleanPath, payload);
+        // Most /local POSTs mutate the queue or rotation, and several of them do it
+        // with raw SQL that never trips a model signal - push a snapshot regardless.
+        const QByteArray response = handleLocalApiPost(cleanPath, payload);
+        scheduleSseBroadcast();
+        return response;
     }
 
     QJsonObject out;
@@ -502,7 +629,7 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     QSqlQuery query;
     query.prepare(
         "SELECT qs.qsongid, rs.name, d.songid, d.artist, d.title, COALESCE(d.duration, 0), qs.keychg, "
-        "COALESCE(rs.paused, 0) "
+        "COALESCE(rs.paused, 0), rs.position "
         "FROM queuesongs qs "
         "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
         "INNER JOIN dbsongs d ON d.songid = qs.song "
@@ -514,6 +641,7 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     QJsonArray upNext;
     if (query.exec()) {
         while (query.next()) {
+            const int singerPosition = query.value(8).toInt();
             QJsonObject request;
             request.insert("request_id", query.value(0).toInt());
             request.insert("singer", query.value(1).toString());
@@ -523,6 +651,8 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             request.insert("duration_seconds", std::max(1, query.value(5).toInt() / 1000));
             request.insert("key_change", query.value(6).toInt());
             request.insert("singer_paused", query.value(7).toBool());
+            request.insert("turns_until", m_rotationModel.positionTurnDistance(singerPosition));
+            request.insert("wait_seconds", m_rotationModel.positionWaitTime(singerPosition));
             request.insert("request_time", QDateTime::currentSecsSinceEpoch());
             requests.append(request);
             upNext.append(request);
@@ -554,6 +684,10 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
                 request.insert("duration_seconds", std::max(1, remainingQuery.value(5).toInt() / 1000));
                 request.insert("key_change", remainingQuery.value(6).toInt());
                 request.insert("singer_paused", remainingQuery.value(7).toBool());
+                // These are the current singer's own leftovers - they're at the mic now,
+                // so there is no wait to report.
+                request.insert("turns_until", 0);
+                request.insert("wait_seconds", 0);
                 request.insert("request_time", QDateTime::currentSecsSinceEpoch());
                 requests.append(request);
                 upNext.append(request);
@@ -1062,7 +1196,9 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"supportsFavorites", true},
         {"supportsUserHistory", true},
         {"supportsAwayToggle", true},
-        {"supportsReorderOwnQueue", true}
+        {"supportsReorderOwnQueue", true},
+        {"supportsEventStream", true},
+        {"eventStreamPath", "/local/events"}
     };
 }
 
