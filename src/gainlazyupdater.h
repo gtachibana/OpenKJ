@@ -45,6 +45,7 @@ class LazyGainUpdateController : public QObject
     QThread workerThread;
     QQueue<QString> m_pending;
     QSet<QString> m_pendingSet;
+    QString m_inFlight;
     bool m_busy{false};
     bool m_playbackActive{false};
     bool m_stopped{false};

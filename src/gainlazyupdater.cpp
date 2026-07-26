@@ -315,32 +315,41 @@ void LazyGainUpdateController::prioritize(const QStringList &paths)
 {
     if (m_stopped || paths.isEmpty())
         return;
-    QStringList needed;
-    for (const auto &path: paths)
+    // Callers pass only songs that still need a gain, so everything here goes to the
+    // front whether or not the current batch happened to contain it. On a large library
+    // most requested songs won't be in the batch at all, and those are exactly the ones
+    // that need jumping the line.
+    for (auto it = paths.crbegin(); it != paths.crend(); ++it)
     {
-        // Already analyzed songs have a non-null gain and are not in the pending set.
-        if (m_pendingSet.contains(path))
-        {
-            m_pending.removeOne(path);
-            needed.append(path);
-        }
-    }
-    for (auto it = needed.crbegin(); it != needed.crend(); ++it)
+        if (*it == m_inFlight)
+            continue;
+        m_pending.removeOne(*it);
+        m_pendingSet.insert(*it);
         m_pending.prepend(*it);
+    }
     dispatchNext();
 }
 
+// Prepending walks the list backwards so the caller's order survives into the queue.
 void LazyGainUpdateController::enqueue(const QStringList &paths, bool front)
 {
+    if (front)
+    {
+        for (auto it = paths.crbegin(); it != paths.crend(); ++it)
+        {
+            if (m_pendingSet.contains(*it) || *it == m_inFlight)
+                continue;
+            m_pendingSet.insert(*it);
+            m_pending.prepend(*it);
+        }
+        return;
+    }
     for (const auto &path: paths)
     {
-        if (m_pendingSet.contains(path))
+        if (m_pendingSet.contains(path) || path == m_inFlight)
             continue;
         m_pendingSet.insert(path);
-        if (front)
-            m_pending.prepend(path);
-        else
-            m_pending.append(path);
+        m_pending.append(path);
     }
 }
 
@@ -349,12 +358,14 @@ void LazyGainUpdateController::dispatchNext()
     if (m_busy || m_stopped || m_playbackActive || m_pending.isEmpty())
         return;
     m_busy = true;
-    emit analyze(m_pending.dequeue());
+    m_inFlight = m_pending.dequeue();
+    emit analyze(m_inFlight);
 }
 
 void LazyGainUpdateController::updateDbGain(const QString &path, double gainDb)
 {
     m_busy = false;
+    m_inFlight.clear();
     m_pendingSet.remove(path);
     m_pendingUpdates.append({path, gainDb});
     if (m_pendingUpdates.size() >= 50)
@@ -372,8 +383,8 @@ void LazyGainUpdateController::updateDbGain(const QString &path, double gainDb)
     }
 }
 
-// Batches writes the same way the duration updater does - one transaction and one model
-// update instead of a write plus an O(n) model scan per song.
+// Batches writes the same way the duration updater does, so a long sweep doesn't hit the
+// database once per song from the UI thread.
 void LazyGainUpdateController::flushPendingUpdates()
 {
     m_flushTimer.stop();
