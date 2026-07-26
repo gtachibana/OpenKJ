@@ -120,6 +120,16 @@
             </spacer>
            </item>
            <item>
+            <widget class="QPushButton" name="btnReorganize">
+             <property name="toolTip">
+              <string>Distribute loose files in the selected folder into subfolders</string>
+             </property>
+             <property name="text">
+              <string>Reorganize...</string>
+             </property>
+            </widget>
+           </item>
+           <item>
             <widget class="QPushButton" name="btnCustomPatterns">
              <property name="text">
               <string>Custom Patterns</string>

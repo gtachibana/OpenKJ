@@ -222,7 +222,8 @@ void MainWindow::setupShortcuts() {
                     curPos = 0;
                 }
                 nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                nextSongPath = nextSinger.nextSongPath();
+                if (!nextSinger.paused)
+                    nextSongPath = nextSinger.nextSongPath();
                 loops++;
             }
         }
@@ -275,7 +276,8 @@ void MainWindow::setupShortcuts() {
                     curPos = 0;
                 }
                 nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                nextSongPath = nextSinger.nextSongPath();
+                if (!nextSinger.paused)
+                    nextSongPath = nextSinger.nextSongPath();
                 loops++;
             }
         }
@@ -1315,6 +1317,8 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
             "CREATE TABLE IF NOT EXISTS local_request_owners ( request_id INTEGER PRIMARY KEY, username_normalized TEXT NOT NULL)");
     query.exec(
             "CREATE TABLE IF NOT EXISTS local_event_settings ( settings_id INTEGER PRIMARY KEY CHECK(settings_id = 1), app_name TEXT NOT NULL DEFAULT 'OpenKJ', tagline TEXT NOT NULL DEFAULT '')");
+    query.exec(
+            "CREATE TABLE IF NOT EXISTS local_user_favorites ( username_normalized TEXT NOT NULL, song_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (username_normalized, song_id))");
     query.exec("INSERT OR IGNORE INTO local_event_settings (settings_id, app_name, tagline) VALUES (1, 'OpenKJ', '')");
     query.exec("PRAGMA synchronous=OFF");
     query.exec("PRAGMA cache_size=300000");
@@ -1400,6 +1404,12 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
                            singersQuery.value("name").toString().toStdString());
         }
     }
+    if (schemaVersion < 107) {
+        m_logger->info("{} Updating database schema to version 107", m_loggingPrefix);
+        query.exec("ALTER TABLE rotationSingers ADD COLUMN paused LOGICAL DEFAULT(0)");
+        query.exec("PRAGMA user_version = 107");
+        m_logger->info("{} DB Schema update to v107 completed", m_loggingPrefix);
+    }
 }
 
 
@@ -1454,8 +1464,6 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
                 return;
             }
         } else if (karaokeFilePath.endsWith(".cdg", Qt::CaseInsensitive)) {
-            QString cdgTmpFile = "tmp.cdg";
-            QString audTmpFile = "tmp.mp3";
             QFile cdgFile(karaokeFilePath);
             if (!cdgFile.exists()) {
                 m_timerTest.stop();
@@ -1478,10 +1486,25 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
                 QMessageBox::warning(this, tr("Bad karaoke file"), tr("Audio file contains no data"), QMessageBox::Ok);
                 return;
             }
-            cdgFile.copy(m_mediaTempDir->path() + QDir::separator() + cdgTmpFile);
-            QFile::copy(audioFilename, m_mediaTempDir->path() + QDir::separator() + audTmpFile);
-            m_mediaBackendKar.setMediaCdg(m_mediaTempDir->path() + QDir::separator() + cdgTmpFile,
-                                          m_mediaTempDir->path() + QDir::separator() + audTmpFile);
+            // The CDG is read into memory by CdgFileReader via QFile, so it can always be played
+            // from its original location. The audio path is handed to GStreamer, which can't
+            // represent everything QString can - copy that to the temp dir only when the original
+            // path wouldn't survive the trip.
+            QString audioSource = audioFilename;
+            if (!pathIsGstSafe(audioFilename)) {
+                QString tmpAudio = m_mediaTempDir->path() + QDir::separator() + "tmp." +
+                                   QFileInfo(audioFilename).suffix();
+                m_logger->info("{} Audio path not representable for GStreamer, playing a temporary copy: {}",
+                               m_loggingPrefix, tmpAudio.toStdString());
+                if (!QFile::copy(audioFilename, tmpAudio)) {
+                    m_timerTest.stop();
+                    QMessageBox::warning(this, tr("Bad karaoke file"),
+                                         tr("Failed to prepare the audio file for playback."), QMessageBox::Ok);
+                    return;
+                }
+                audioSource = tmpAudio;
+            }
+            m_mediaBackendKar.setMediaCdg(karaokeFilePath, audioSource);
             if (!k2k)
                 m_mediaBackendBm.fadeOut(!m_settings.bmKCrossFade());
             QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -1491,11 +1514,21 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
         } else {
             // Close CDG if open to avoid double video playback
             m_logger->info("{} Playing non-CDG video file: {}", m_loggingPrefix, karaokeFilePath.toStdString());
-            QString tmpFilePath = m_mediaTempDir->path() + QDir::separator() + "tmpvid." + karaokeFilePath.right(4);
-            QFile::copy(karaokeFilePath, tmpFilePath);
-            m_logger->info("{} Playing temporary copy to avoid bad filename stuff w/ gstreamer: {}", m_loggingPrefix,
-                           tmpFilePath.toStdString());
-            m_mediaBackendKar.setMedia(tmpFilePath);
+            QString videoSource = karaokeFilePath;
+            if (!pathIsGstSafe(karaokeFilePath)) {
+                QString tmpFilePath = m_mediaTempDir->path() + QDir::separator() + "tmpvid." +
+                                      QFileInfo(karaokeFilePath).suffix();
+                m_logger->info("{} Video path not representable for GStreamer, playing a temporary copy: {}",
+                               m_loggingPrefix, tmpFilePath.toStdString());
+                if (!QFile::copy(karaokeFilePath, tmpFilePath)) {
+                    m_timerTest.stop();
+                    QMessageBox::warning(this, tr("Bad karaoke file"),
+                                         tr("Failed to prepare the video file for playback."), QMessageBox::Ok);
+                    return;
+                }
+                videoSource = tmpFilePath;
+            }
+            m_mediaBackendKar.setMedia(videoSource);
             if (!k2k)
                 m_mediaBackendBm.fadeOut();
             m_mediaBackendKar.play();
@@ -2105,7 +2138,7 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
                             curPos = 0;
                         }
                         nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                        if (nextSinger.id != curSingerId || loops >= otherSingers)
+                        if ((nextSinger.id != curSingerId || loops >= otherSingers) && !nextSinger.paused)
                             nextSongPath = nextSinger.nextSongPath();
                         loops++;
                     }
@@ -2329,6 +2362,12 @@ void MainWindow::tableViewRotationContextMenuRequested(const QPoint &pos) {
             contextMenu.addAction("Rename", this, &MainWindow::renameSinger);
             contextMenu.addAction("Set as top of rotation", [&]() {
                 m_rotModel.setRotationTopSingerId(m_rtClickRotationSingerId);
+            });
+            // Singers can set this from their phone, but the KJ needs to be able
+            // to undo it when someone marks themselves away and then vanishes.
+            const bool paused = m_rotModel.getSinger(m_rtClickRotationSingerId).paused;
+            contextMenu.addAction(paused ? "Mark as back" : "Mark as stepped away", [&, paused]() {
+                m_rotModel.singerSetPaused(m_rtClickRotationSingerId, !paused);
             });
         }
         contextMenu.exec(QCursor::pos());
@@ -4570,7 +4609,7 @@ void MainWindow::startAutoPlayIfIdle() {
             if (++curPos >= m_rotModel.singerCount())
                 curPos = 0;
             nextSinger = m_rotModel.getSingerAtPosition(curPos);
-            if (nextSinger.id != curSingerId || loops >= otherSingers)
+            if ((nextSinger.id != curSingerId || loops >= otherSingers) && !nextSinger.paused)
                 nextSongPath = nextSinger.nextSongPath();
             loops++;
         }

@@ -501,7 +501,8 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
 
     QSqlQuery query;
     query.prepare(
-        "SELECT qs.qsongid, rs.name, d.songid, d.artist, d.title, COALESCE(d.duration, 0), qs.keychg "
+        "SELECT qs.qsongid, rs.name, d.songid, d.artist, d.title, COALESCE(d.duration, 0), qs.keychg, "
+        "COALESCE(rs.paused, 0) "
         "FROM queuesongs qs "
         "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
         "INNER JOIN dbsongs d ON d.songid = qs.song "
@@ -521,6 +522,7 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             request.insert("title", query.value(4).toString());
             request.insert("duration_seconds", std::max(1, query.value(5).toInt() / 1000));
             request.insert("key_change", query.value(6).toInt());
+            request.insert("singer_paused", query.value(7).toBool());
             request.insert("request_time", QDateTime::currentSecsSinceEpoch());
             requests.append(request);
             upNext.append(request);
@@ -532,7 +534,8 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     if (nowSingerId >= 0) {
         QSqlQuery remainingQuery;
         remainingQuery.prepare(
-            "SELECT qs.qsongid, rs.name, d.songid, d.artist, d.title, COALESCE(d.duration, 0), qs.keychg "
+            "SELECT qs.qsongid, rs.name, d.songid, d.artist, d.title, COALESCE(d.duration, 0), qs.keychg, "
+            "COALESCE(rs.paused, 0) "
             "FROM queuesongs qs "
             "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
             "INNER JOIN dbsongs d ON d.songid = qs.song "
@@ -550,6 +553,7 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
                 request.insert("title", remainingQuery.value(4).toString());
                 request.insert("duration_seconds", std::max(1, remainingQuery.value(5).toInt() / 1000));
                 request.insert("key_change", remainingQuery.value(6).toInt());
+                request.insert("singer_paused", remainingQuery.value(7).toBool());
                 request.insert("request_time", QDateTime::currentSecsSinceEpoch());
                 requests.append(request);
                 upNext.append(request);
@@ -721,6 +725,12 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiGet(const QString &path, const QUrlQ
     if (path == "/local/user/me") {
         return jsonResponse(200, currentLocalUser(query));
     }
+    if (path == "/local/user/favorites") {
+        return jsonResponse(200, listUserFavorites(query));
+    }
+    if (path == "/local/user/history") {
+        return jsonResponse(200, listUserHistory(query));
+    }
     if (path == "/local/auth/me") {
         return jsonResponse(200, currentAdmin(query));
     }
@@ -751,11 +761,23 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiPost(const QString &path, const QJso
     if (path == "/local/user/profile/password") {
         return jsonResponse(200, updateLocalPassword(payload));
     }
+    if (path == "/local/user/favorites") {
+        return jsonResponse(200, addUserFavorite(payload));
+    }
+    if (path == "/local/user/favorites/remove") {
+        return jsonResponse(200, removeUserFavorite(payload));
+    }
     if (path == "/local/request") {
         return jsonResponse(200, requestSongFromLocalUser(payload));
     }
     if (path == "/local/request/remove") {
         return jsonResponse(200, removeOwnRequest(payload));
+    }
+    if (path == "/local/request/move") {
+        return jsonResponse(200, moveOwnRequest(payload));
+    }
+    if (path == "/local/user/away") {
+        return jsonResponse(200, setOwnAway(payload));
     }
     if (path == "/local/auth/login") {
         return jsonResponse(200, loginAdmin(payload));
@@ -1036,7 +1058,11 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"supportsRemoveOwnSong", true},
         {"supportsLocalUsers", true},
         {"supportsAdminAuth", true},
-        {"supportsLocalMode", true}
+        {"supportsLocalMode", true},
+        {"supportsFavorites", true},
+        {"supportsUserHistory", true},
+        {"supportsAwayToggle", true},
+        {"supportsReorderOwnQueue", true}
     };
 }
 
@@ -1055,6 +1081,208 @@ QJsonObject OpenKJEmbeddedApi::buildEventSettings() const
     }
 
     return QJsonObject{{"ok", true}, {"appName", appName}, {"tagline", tagline}};
+}
+
+bool OpenKJEmbeddedApi::userOwnsRequest(const int requestId, const QString &normalizedUsername, QString *error) const
+{
+    const QString owner = requestOwner(requestId);
+    if (!owner.isEmpty()) {
+        if (owner != normalizedUsername) {
+            *error = "You can only change your own songs";
+            return false;
+        }
+        return true;
+    }
+
+    // No ownership record - song was likely added via the desktop app.
+    // Fall back to verifying the queue entry belongs to this singer.
+    QSqlQuery singerCheck;
+    singerCheck.prepare(
+        "SELECT rs.name FROM queuesongs qs "
+        "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
+        "WHERE qs.qsongid = :id AND qs.played = 0");
+    singerCheck.bindValue(":id", requestId);
+    if (!singerCheck.exec() || !singerCheck.next()) {
+        *error = "Song not found in queue";
+        return false;
+    }
+    if (normalizeUsername(singerCheck.value(0).toString()) != normalizedUsername) {
+        *error = "You can only change your own songs";
+        return false;
+    }
+    return true;
+}
+
+QJsonObject OpenKJEmbeddedApi::moveOwnRequest(const QJsonObject &payload)
+{
+    QString normalized;
+    if (!isValidUserSession(payload.value("token").toString().trimmed(), &normalized)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    const int requestId = payload.value("entryId").toString().toInt();
+    if (requestId <= 0) {
+        return QJsonObject{{"ok", false}, {"error", "Missing entryId"}};
+    }
+
+    const QString direction = payload.value("direction").toString().trimmed().toLower();
+    if (direction != "up" && direction != "down") {
+        return QJsonObject{{"ok", false}, {"error", "direction must be 'up' or 'down'"}};
+    }
+
+    QString ownershipError;
+    if (!userOwnsRequest(requestId, normalized, &ownershipError)) {
+        return QJsonObject{{"ok", false}, {"error", ownershipError}};
+    }
+
+    // Positions are per-singer, so this only ever reorders the user's own
+    // queue - it can't change their place in the rotation.
+    if (!moveQueueSongByOffset(requestId, direction == "up" ? -1 : 1)) {
+        return QJsonObject{{"ok", false}, {"error", "Could not move that song"}};
+    }
+
+    nextSerial();
+    return QJsonObject{{"ok", true}};
+}
+
+QJsonObject OpenKJEmbeddedApi::setOwnAway(const QJsonObject &payload)
+{
+    QString normalized;
+    QString username;
+    if (!isValidUserSession(payload.value("token").toString().trimmed(), &normalized, &username)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    if (!m_rotationModel.singerExists(username)) {
+        return QJsonObject{{"ok", false}, {"error", "You are not in the rotation"}};
+    }
+
+    const bool away = payload.value("away").toBool();
+    m_rotationModel.singerSetPaused(m_rotationModel.getSingerByName(username).id, away);
+    nextSerial();
+    return QJsonObject{{"ok", true}, {"away", away}};
+}
+
+QJsonObject OpenKJEmbeddedApi::listUserFavorites(const QUrlQuery &query)
+{
+    QString normalized;
+    if (!isValidUserSession(query.queryItemValue("token").trimmed(), &normalized)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    QSqlQuery select;
+    select.prepare("SELECT ds.songid, ds.artist, ds.title, COALESCE(ds.duration, 0) "
+                   "FROM local_user_favorites f "
+                   "JOIN dbsongs ds ON ds.songid = f.song_id "
+                   "WHERE f.username_normalized = :username "
+                   "AND ds.discid != '!!DROPPED!!' AND ds.discid != '!!BAD!!' "
+                   "ORDER BY upper(ds.artist), upper(ds.title)");
+    select.bindValue(":username", normalized);
+
+    QJsonArray songs;
+    if (select.exec()) {
+        while (select.next()) {
+            songs.append(QJsonObject{
+                {"song_id", select.value(0).toInt()},
+                {"artist", select.value(1).toString()},
+                {"title", select.value(2).toString()},
+                {"duration_seconds", std::max(1, select.value(3).toInt() / 1000)}
+            });
+        }
+    }
+
+    return QJsonObject{{"ok", true}, {"songs", songs}};
+}
+
+QJsonObject OpenKJEmbeddedApi::addUserFavorite(const QJsonObject &payload)
+{
+    QString normalized;
+    if (!isValidUserSession(payload.value("token").toString().trimmed(), &normalized)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    const int songId = payload.value("songId").toInt();
+    QSqlQuery exists;
+    exists.prepare("SELECT songid FROM dbsongs WHERE songid = :song_id "
+                   "AND discid != '!!DROPPED!!' AND discid != '!!BAD!!'");
+    exists.bindValue(":song_id", songId);
+    if (!exists.exec() || !exists.next()) {
+        return QJsonObject{{"ok", false}, {"error", "Unknown song"}};
+    }
+
+    QSqlQuery insert;
+    insert.prepare("INSERT INTO local_user_favorites (username_normalized, song_id, created_at) "
+                   "VALUES (:username, :song_id, strftime('%s','now')) "
+                   "ON CONFLICT(username_normalized, song_id) DO NOTHING");
+    insert.bindValue(":username", normalized);
+    insert.bindValue(":song_id", songId);
+    if (!insert.exec()) {
+        return QJsonObject{{"ok", false}, {"error", insert.lastError().text()}};
+    }
+
+    return QJsonObject{{"ok", true}};
+}
+
+QJsonObject OpenKJEmbeddedApi::removeUserFavorite(const QJsonObject &payload)
+{
+    QString normalized;
+    if (!isValidUserSession(payload.value("token").toString().trimmed(), &normalized)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    QSqlQuery remove;
+    remove.prepare("DELETE FROM local_user_favorites WHERE username_normalized = :username AND song_id = :song_id");
+    remove.bindValue(":username", normalized);
+    remove.bindValue(":song_id", payload.value("songId").toInt());
+    if (!remove.exec()) {
+        return QJsonObject{{"ok", false}, {"error", remove.lastError().text()}};
+    }
+
+    return QJsonObject{{"ok", true}};
+}
+
+QJsonObject OpenKJEmbeddedApi::listUserHistory(const QUrlQuery &query)
+{
+    QString normalized;
+    if (!isValidUserSession(query.queryItemValue("token").trimmed(), &normalized)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    const int limit = std::clamp(query.queryItemValue("limit").toInt(), 1, 500);
+
+    // A local user's rotation singer name is their username (see
+    // requestSongFromLocalUser), which is how history rows tie back to them.
+    // The join to dbsongs is what makes a past song re-requestable; it can miss
+    // if the file has since left the library, hence the availability flag.
+    QSqlQuery select;
+    select.prepare("SELECT COALESCE(ds.songid, 0), hs.artist, hs.title, hs.plays, hs.lastplay, "
+                   "COALESCE(ds.duration, 0) "
+                   "FROM historySongs hs "
+                   "JOIN historySingers hsing ON hsing.id = hs.historySinger "
+                   "LEFT JOIN dbsongs ds ON ds.path = hs.filepath "
+                   "AND ds.discid != '!!DROPPED!!' AND ds.discid != '!!BAD!!' "
+                   "WHERE lower(hsing.name) = :username "
+                   "ORDER BY hs.lastplay DESC LIMIT :limit");
+    select.bindValue(":username", normalized);
+    select.bindValue(":limit", limit);
+
+    QJsonArray songs;
+    if (select.exec()) {
+        while (select.next()) {
+            const int songId = select.value(0).toInt();
+            songs.append(QJsonObject{
+                {"song_id", songId},
+                {"artist", select.value(1).toString()},
+                {"title", select.value(2).toString()},
+                {"plays", select.value(3).toInt()},
+                {"last_played", select.value(4).toDateTime().toString(Qt::ISODate)},
+                {"duration_seconds", std::max(1, select.value(5).toInt() / 1000)},
+                {"available", songId > 0}
+            });
+        }
+    }
+
+    return QJsonObject{{"ok", true}, {"songs", songs}};
 }
 
 bool OpenKJEmbeddedApi::ensureLocalModeSchema()
@@ -1081,7 +1309,13 @@ bool OpenKJEmbeddedApi::ensureLocalModeSchema()
         "CREATE TABLE IF NOT EXISTS local_event_settings ("
         "settings_id INTEGER PRIMARY KEY CHECK(settings_id = 1),"
         "app_name TEXT NOT NULL DEFAULT 'OpenKJ',"
-        "tagline TEXT NOT NULL DEFAULT '')"
+        "tagline TEXT NOT NULL DEFAULT '')",
+        "CREATE TABLE IF NOT EXISTS local_user_favorites ("
+        "username_normalized TEXT NOT NULL,"
+        "song_id INTEGER NOT NULL,"
+        "created_at INTEGER NOT NULL,"
+        "PRIMARY KEY (username_normalized, song_id),"
+        "FOREIGN KEY(username_normalized) REFERENCES local_users(username_normalized) ON DELETE CASCADE)"
     };
 
     for (const auto &statement : statements) {
@@ -1234,7 +1468,14 @@ QJsonObject OpenKJEmbeddedApi::currentLocalUser(const QUrlQuery &query)
     QString username;
     const bool authenticated = isValidUserSession(query.queryItemValue("token"), &normalized, &username);
     Q_UNUSED(normalized)
-    return QJsonObject{{"ok", true}, {"authenticated", authenticated}, {"username", authenticated ? username : QString()}};
+    const bool inRotation = authenticated && m_rotationModel.singerExists(username);
+    return QJsonObject{
+        {"ok", true},
+        {"authenticated", authenticated},
+        {"username", authenticated ? username : QString()},
+        {"inRotation", inRotation},
+        {"away", inRotation && m_rotationModel.getSingerByName(username).paused}
+    };
 }
 
 QJsonObject OpenKJEmbeddedApi::updateLocalUsername(const QJsonObject &payload)
@@ -1282,8 +1523,32 @@ QJsonObject OpenKJEmbeddedApi::updateLocalUsername(const QJsonObject &payload)
     updateRequests.bindValue(":current_normalized", currentNormalized);
     const bool requestsOk = updateRequests.exec();
 
-    tx.exec(userOk && sessionsOk && requestsOk ? "COMMIT" : "ROLLBACK");
-    if (!(userOk && sessionsOk && requestsOk)) {
+    QSqlQuery updateFavorites;
+    updateFavorites.prepare("UPDATE local_user_favorites SET username_normalized = :next_normalized "
+                            "WHERE username_normalized = :current_normalized");
+    updateFavorites.bindValue(":next_normalized", nextNormalized);
+    updateFavorites.bindValue(":current_normalized", currentNormalized);
+    const bool favoritesOk = updateFavorites.exec();
+
+    // Sung-song history is keyed by rotation singer name, which for a local
+    // user is their username. Carry it across so a rename doesn't orphan it.
+    // historySingers.name is UNIQUE, so only do this when the new name isn't
+    // already taken - merging two singers' history is not something to do
+    // silently behind a profile edit.
+    QSqlQuery historyTaken;
+    historyTaken.prepare("SELECT id FROM historySingers WHERE lower(name) = :name");
+    historyTaken.bindValue(":name", nextNormalized);
+    if (!(historyTaken.exec() && historyTaken.next())) {
+        QSqlQuery renameHistorySinger;
+        renameHistorySinger.prepare("UPDATE historySingers SET name = :next WHERE lower(name) = :current");
+        renameHistorySinger.bindValue(":next", nextUsername);
+        renameHistorySinger.bindValue(":current", currentNormalized);
+        renameHistorySinger.exec();
+    }
+
+    const bool allOk = userOk && sessionsOk && requestsOk && favoritesOk;
+    tx.exec(allOk ? "COMMIT" : "ROLLBACK");
+    if (!allOk) {
         return QJsonObject{{"ok", false}, {"error", "Could not update username"}};
     }
 
@@ -1383,25 +1648,9 @@ QJsonObject OpenKJEmbeddedApi::removeOwnRequest(const QJsonObject &payload)
         return QJsonObject{{"ok", false}, {"error", "Missing entryId"}};
     }
 
-    const QString owner = requestOwner(requestId);
-    if (!owner.isEmpty() && owner != normalized) {
-        return QJsonObject{{"ok", false}, {"error", "You can only remove your own songs"}};
-    }
-    if (owner.isEmpty()) {
-        // No ownership record — song was likely added via the desktop app.
-        // Fall back to verifying the queue entry belongs to this singer.
-        QSqlQuery singerCheck;
-        singerCheck.prepare(
-            "SELECT rs.name FROM queuesongs qs "
-            "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
-            "WHERE qs.qsongid = :id AND qs.played = 0");
-        singerCheck.bindValue(":id", requestId);
-        if (!singerCheck.exec() || !singerCheck.next()) {
-            return QJsonObject{{"ok", false}, {"error", "Song not found in queue"}};
-        }
-        if (normalizeUsername(singerCheck.value(0).toString()) != normalized) {
-            return QJsonObject{{"ok", false}, {"error", "You can only remove your own songs"}};
-        }
+    QString ownershipError;
+    if (!userOwnsRequest(requestId, normalized, &ownershipError)) {
+        return QJsonObject{{"ok", false}, {"error", ownershipError}};
     }
 
     if (!removeQueueSongById(requestId)) {

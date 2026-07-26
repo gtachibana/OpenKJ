@@ -37,6 +37,15 @@ inline QString findMatchingAudioFile(const QString &cdgFilePath) {
     return QString();
 }
 
+// GStreamer is handed file paths encoded with QString::toLocal8Bit() (see
+// MediaBackend::play), which silently mangles any character the local 8-bit
+// codec can't represent. Returns true when a path survives that round trip and
+// can therefore be played straight from its original location instead of being
+// copied somewhere with a safe name first.
+inline bool pathIsGstSafe(const QString &path) {
+    return QString::fromLocal8Bit(path.toLocal8Bit()) == path;
+}
+
 // Strips any "[...]" bracketed segments (e.g. "[Karaoke Version]") out of a
 // song artist/title string, collapsing the resulting whitespace.
 inline QString stripBracketedText(const QString &text) {

@@ -95,6 +95,15 @@ private:
     QJsonObject currentAdmin(const QUrlQuery &query);
     QJsonObject requestSongFromLocalUser(const QJsonObject &payload);
     QJsonObject removeOwnRequest(const QJsonObject &payload);
+    QJsonObject moveOwnRequest(const QJsonObject &payload);
+    QJsonObject setOwnAway(const QJsonObject &payload);
+    // True when the queue entry belongs to this user, either by ownership
+    // record or - for songs the KJ added on their behalf - by singer name.
+    bool userOwnsRequest(int requestId, const QString &normalizedUsername, QString *error) const;
+    QJsonObject listUserFavorites(const QUrlQuery &query);
+    QJsonObject addUserFavorite(const QJsonObject &payload);
+    QJsonObject removeUserFavorite(const QJsonObject &payload);
+    QJsonObject listUserHistory(const QUrlQuery &query);
     QJsonObject runAdminActionRest(const QJsonObject &payload);
     bool recordRequestOwner(int requestId, const QString &normalizedUsername);
     QString requestOwner(int requestId) const;

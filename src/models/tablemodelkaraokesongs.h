@@ -70,6 +70,10 @@ private:
     std::vector< std::shared_ptr<okj::KaraokeSong> > m_allSongs;
     QHash<QString, std::shared_ptr<okj::KaraokeSong>> m_songsByPath;
     QString m_lastSearch;
+    QString m_lastSearchRaw;
+    QString m_lastExecutedSearch;
+    bool m_canNarrowSearch{false};
+    bool m_haystacksIgnoreApos{false};
     int m_curFontHeight{0};
     QImage m_iconCdg;
     QImage m_iconZip;
@@ -83,6 +87,11 @@ private:
     QTimer searchTimer{this};
 
     void searchExec();
+    void requestSearch();
+    void invalidateSearchNarrowing();
+    void rebuildSearchHaystacks(bool ignoreApos);
+    static void setSearchHaystacks(okj::KaraokeSong &song, bool ignoreApos);
+    [[nodiscard]] const QString &searchHaystack(const okj::KaraokeSong &song) const;
     void rebuildPathHash();
     static QVariant getColumnName(int section) ;
     [[nodiscard]] QVariant getColumnSizeHint(int section) const;
