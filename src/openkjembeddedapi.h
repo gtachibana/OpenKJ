@@ -6,6 +6,8 @@
 #include <QTcpSocket>
 #include <QHash>
 #include <QJsonObject>
+#include <QSet>
+#include <QTimer>
 #include <QUrlQuery>
 #include "models/tablemodelrotation.h"
 #include "models/tablemodelqueuesongs.h"
@@ -42,9 +44,21 @@ private:
     TableModelQueueSongs &m_queueModel;
     Settings &m_settings;
 
+    // Sockets parked on GET /local/events. They never get a Content-Length or a
+    // close - we hold them open and push snapshots until the client goes away.
+    QSet<QTcpSocket *> m_sseClients;
+    QTimer m_sseBroadcastTimer;
+    QTimer m_sseRefreshTimer;
+    quint64 m_sseEventId{0};
+
     void onNewConnection();
     void onSocketReadyRead();
     void onSocketDisconnected();
+
+    void beginEventStream(QTcpSocket *socket);
+    void scheduleSseBroadcast();
+    void broadcastSseSnapshot();
+    void writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data);
 
     bool tryParseHttpRequest(QByteArray &buffer, HttpRequest &request);
     QByteArray handleRequest(const HttpRequest &request);
