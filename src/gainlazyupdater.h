@@ -49,8 +49,14 @@ class LazyGainUpdateController : public QObject
     bool m_busy{false};
     bool m_playbackActive{false};
     bool m_stopped{false};
+    bool m_tearingDown{false};
     QTimer m_flushTimer;
     QVector<QPair<QString, double>> m_pendingUpdates;
+    // Progress counters for the UI. Re-read from the database on every seed rather
+    // than only tracked incrementally, so a manual re-analysis - which puts a row
+    // back to NULL - can't leave them permanently skewed.
+    int m_analyzedSongs{0};
+    int m_totalSongs{0};
     std::string m_loggingPrefix{"[LazyGainController]"};
     std::shared_ptr<spdlog::logger> m_logger;
 
@@ -62,6 +68,7 @@ class LazyGainUpdateController : public QObject
     void seedQueue();
     void dispatchNext();
     void flushPendingUpdates();
+    void refreshCounts();
 
 public:
     explicit LazyGainUpdateController(QObject *parent = nullptr);
@@ -71,6 +78,9 @@ public:
     // the rest of the library most-played first - and starts analyzing if idle.
     void getGains();
     void stopWork();
+    // Clears one song's stored gain and puts it at the head of the queue. The escape
+    // hatch for a track whose measured gain came out obviously wrong.
+    void reanalyze(const QString &path);
 
 public slots:
     // Analysis fully decodes the file, so it only runs while karaoke playback is idle.
@@ -83,6 +93,10 @@ public slots:
 
 signals:
     void analyze(const QString &path);
+    // Freshly measured gains, batched the same way they are written to the database
+    // so the song model can update in place instead of reloading.
+    void gotGains(const QVector<QPair<QString, double>> &gains);
+    void progressChanged(int analyzed, int total);
 };
 
 #endif // GAINLAZYUPDATER_H

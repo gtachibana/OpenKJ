@@ -1,7 +1,9 @@
 #include "openkjembeddedapi.h"
 
 #include <algorithm>
+#include <iterator>
 #include <QCryptographicHash>
+#include <QPair>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -13,6 +15,40 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QUuid>
+#include <QPasswordDigestor>
+
+namespace {
+
+// Every request this API serves is a short JSON envelope or a bare GET, so these
+// caps are orders of magnitude above anything legitimate. They exist so a client
+// that never finishes sending can't grow a buffer without bound on the UI thread.
+constexpr int kMaxHeaderBytes = 16 * 1024;
+constexpr int kMaxBodyBytes = 256 * 1024;
+
+// A request that hasn't completed in this long is abandoned, not slow. SSE clients
+// are exempt - being idle is the entire point of that connection.
+constexpr qint64 kIdleTimeoutMs = 20000;
+constexpr int kIdleSweepIntervalMs = 5000;
+
+// Ceiling on simultaneous sockets. A room full of phones is a few dozen; anything
+// past this is something misbehaving, and refusing is better than running the app
+// out of descriptors mid-show.
+constexpr int kMaxConnections = 256;
+
+constexpr int kLoginFailureLimit = 10;
+constexpr qint64 kLoginFailureWindowMs = 5 * 60 * 1000;
+constexpr qint64 kLoginLockoutMs = 5 * 60 * 1000;
+
+// PBKDF2 work factor. Deliberately below the usual web-app recommendation: this
+// runs on the Qt main thread, so the cost is paid as UI latency during a show.
+// 50k puts a login at roughly 50ms while making an offline crack of a leaked
+// openkj.sqlite ~50,000x more expensive than the SHA-256 this replaced. The value
+// is stored per row, so it can be raised later without invalidating anything.
+constexpr int kPbkdf2Iterations = 50000;
+constexpr int kPbkdf2KeyBytes = 32;
+constexpr int kSaltBytes = 16;
+
+} // namespace
 
 OpenKJEmbeddedApi::OpenKJEmbeddedApi(TableModelRotation &rotationModel,
                                      TableModelQueueSongs &queueModel,
@@ -40,6 +76,9 @@ OpenKJEmbeddedApi::OpenKJEmbeddedApi(TableModelRotation &rotationModel,
             this, &OpenKJEmbeddedApi::scheduleSseBroadcast);
     connect(&m_queueModel, &TableModelQueueSongs::queueModified,
             this, [this](int) { scheduleSseBroadcast(); });
+
+    m_idleSweepTimer.setInterval(kIdleSweepIntervalMs);
+    connect(&m_idleSweepTimer, &QTimer::timeout, this, &OpenKJEmbeddedApi::sweepIdleConnections);
 }
 
 bool OpenKJEmbeddedApi::start(const quint16 port, const QHostAddress &address)
@@ -49,7 +88,11 @@ bool OpenKJEmbeddedApi::start(const quint16 port, const QHostAddress &address)
     }
 
     ensureLocalModeSchema();
-    return m_server.listen(address, port);
+    if (!m_server.listen(address, port)) {
+        return false;
+    }
+    m_idleSweepTimer.start();
+    return true;
 }
 
 void OpenKJEmbeddedApi::stop()
@@ -60,9 +103,10 @@ void OpenKJEmbeddedApi::stop()
 
     m_sseBroadcastTimer.stop();
     m_sseRefreshTimer.stop();
+    m_idleSweepTimer.stop();
     m_sseClients.clear();
 
-    for (QTcpSocket *socket : m_buffers.keys()) {
+    for (QTcpSocket *socket : m_connections.keys()) {
         socket->disconnectFromHost();
     }
 
@@ -73,7 +117,14 @@ void OpenKJEmbeddedApi::onNewConnection()
 {
     while (m_server.hasPendingConnections()) {
         QTcpSocket *socket = m_server.nextPendingConnection();
-        m_buffers.insert(socket, QByteArray());
+        if (m_connections.size() >= kMaxConnections) {
+            // Drop it outright rather than accept and queue: at this point the
+            // useful thing is to stop consuming sockets, not to explain why.
+            socket->abort();
+            socket->deleteLater();
+            continue;
+        }
+        m_connections.insert(socket, Connection{{}, QDateTime::currentMSecsSinceEpoch()});
         connect(socket, &QTcpSocket::readyRead, this, &OpenKJEmbeddedApi::onSocketReadyRead);
         connect(socket, &QTcpSocket::disconnected, this, &OpenKJEmbeddedApi::onSocketDisconnected);
     }
@@ -82,23 +133,39 @@ void OpenKJEmbeddedApi::onNewConnection()
 void OpenKJEmbeddedApi::onSocketReadyRead()
 {
     auto *socket = qobject_cast<QTcpSocket *>(sender());
-    if (!socket || !m_buffers.contains(socket)) {
+    if (!socket) {
+        return;
+    }
+    auto connection = m_connections.find(socket);
+    if (connection == m_connections.end()) {
         return;
     }
 
-    auto &buffer = m_buffers[socket];
-    buffer.append(socket->readAll());
+    connection->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
+    connection->buffer.append(socket->readAll());
 
     // An event-stream socket has nothing left to say; drop anything it sends so
     // the buffer can't grow unbounded while we hold the connection open.
     if (m_sseClients.contains(socket)) {
-        buffer.clear();
+        connection->buffer.clear();
         return;
     }
 
     HttpRequest request;
-    if (!tryParseHttpRequest(buffer, request)) {
-        return;
+    switch (tryParseHttpRequest(connection->buffer, request)) {
+        case ParseResult::Incomplete:
+            return;
+        case ParseResult::Malformed:
+            sendErrorAndClose(socket, 400, "Malformed request");
+            return;
+        case ParseResult::HeaderTooLarge:
+            sendErrorAndClose(socket, 431, "Request header fields too large");
+            return;
+        case ParseResult::BodyTooLarge:
+            sendErrorAndClose(socket, 413, "Request body too large");
+            return;
+        case ParseResult::Complete:
+            break;
     }
 
     if (request.method == "GET") {
@@ -111,8 +178,46 @@ void OpenKJEmbeddedApi::onSocketReadyRead()
         }
     }
 
+    m_currentClientKey = socket->peerAddress().toString();
     const QByteArray response = handleRequest(request);
+    m_currentClientKey.clear();
     socket->write(response);
+    socket->disconnectFromHost();
+}
+
+// Sockets are dropped on inactivity rather than on a per-request deadline, so a
+// slow upload still succeeds as long as bytes keep arriving.
+void OpenKJEmbeddedApi::sweepIdleConnections()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    // Collected first because disconnectFromHost() can emit disconnected()
+    // synchronously, and that removes the entry we would be iterating over.
+    QList<QTcpSocket *> expired;
+    for (auto it = m_connections.cbegin(); it != m_connections.cend(); ++it) {
+        if (m_sseClients.contains(it.key())) {
+            continue;
+        }
+        if (now - it.value().lastActivityMs >= kIdleTimeoutMs) {
+            expired.append(it.key());
+        }
+    }
+    for (QTcpSocket *socket : expired) {
+        socket->disconnectFromHost();
+    }
+
+    // Piggyback the throttle cleanup: without it, one entry per peer address that
+    // ever failed a login would accumulate for the life of the process.
+    for (auto it = m_loginThrottle.begin(); it != m_loginThrottle.end();) {
+        const bool locked = now < it.value().lockedUntilMs;
+        const bool windowLive = now - it.value().windowStartMs < kLoginFailureWindowMs;
+        it = (locked || windowLive) ? std::next(it) : m_loginThrottle.erase(it);
+    }
+}
+
+void OpenKJEmbeddedApi::sendErrorAndClose(QTcpSocket *socket, const int statusCode, const QString &message)
+{
+    socket->write(jsonResponse(statusCode, QJsonObject{{"ok", false}, {"error", message}}));
     socket->disconnectFromHost();
 }
 
@@ -123,7 +228,7 @@ void OpenKJEmbeddedApi::onSocketDisconnected()
         return;
     }
 
-    m_buffers.remove(socket);
+    m_connections.remove(socket);
     m_sseClients.remove(socket);
     if (m_sseClients.isEmpty()) {
         m_sseRefreshTimer.stop();
@@ -145,6 +250,11 @@ void OpenKJEmbeddedApi::beginEventStream(QTcpSocket *socket)
     // How long EventSource should wait before reconnecting after a drop.
     headers.append("retry: 3000\n\n");
     socket->write(headers);
+
+    // Exempt from the idle sweep from here on, so let TCP notice a phone that left
+    // the building. Without this a half-open stream lingers until the OS default
+    // keepalive fires, which is hours away.
+    socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
 
     m_sseClients.insert(socket);
     if (!m_sseRefreshTimer.isActive()) {
@@ -211,37 +321,54 @@ void OpenKJEmbeddedApi::writeSseFrame(QTcpSocket *socket, const QByteArray &even
     socket->flush();
 }
 
-bool OpenKJEmbeddedApi::tryParseHttpRequest(QByteArray &buffer, HttpRequest &request)
+OpenKJEmbeddedApi::ParseResult OpenKJEmbeddedApi::tryParseHttpRequest(QByteArray &buffer, HttpRequest &request)
 {
     const int headerEnd = buffer.indexOf("\r\n\r\n");
     if (headerEnd < 0) {
-        return false;
+        // Still no end of headers in sight - either more is coming or the client
+        // is never going to send it.
+        return buffer.size() > kMaxHeaderBytes ? ParseResult::HeaderTooLarge : ParseResult::Incomplete;
+    }
+    if (headerEnd > kMaxHeaderBytes) {
+        return ParseResult::HeaderTooLarge;
     }
 
     const QByteArray headerSection = buffer.left(headerEnd);
     const QList<QByteArray> headerLines = headerSection.split('\n');
     if (headerLines.isEmpty()) {
-        return false;
+        return ParseResult::Malformed;
     }
 
     const QList<QByteArray> firstLineParts = headerLines.first().trimmed().split(' ');
     if (firstLineParts.size() < 2) {
-        return false;
+        return ParseResult::Malformed;
     }
 
     request.method = QString::fromUtf8(firstLineParts.at(0)).trimmed().toUpper();
     request.path = QString::fromUtf8(firstLineParts.at(1)).trimmed();
     request.headers = parseHeaders(headerLines.mid(1));
 
-    const int contentLength = request.headers.value("content-length", "0").toInt();
-    const int totalNeeded = headerEnd + 4 + contentLength;
-    if (buffer.size() < totalNeeded) {
-        return false;
+    // Parsed strictly: a garbage Content-Length used to silently read as 0, which
+    // left whatever followed it sitting in the buffer to be parsed as a request.
+    bool lengthValid = true;
+    const qint64 contentLength = request.headers.contains("content-length")
+                                         ? request.headers.value("content-length").toLongLong(&lengthValid)
+                                         : 0;
+    if (!lengthValid || contentLength < 0) {
+        return ParseResult::Malformed;
+    }
+    if (contentLength > kMaxBodyBytes) {
+        return ParseResult::BodyTooLarge;
     }
 
-    request.body = buffer.mid(headerEnd + 4, contentLength);
-    buffer.remove(0, totalNeeded);
-    return true;
+    const qint64 totalNeeded = static_cast<qint64>(headerEnd) + 4 + contentLength;
+    if (buffer.size() < totalNeeded) {
+        return ParseResult::Incomplete;
+    }
+
+    request.body = buffer.mid(headerEnd + 4, static_cast<int>(contentLength));
+    buffer.remove(0, static_cast<int>(totalNeeded));
+    return ParseResult::Complete;
 }
 
 QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
@@ -986,6 +1113,10 @@ QByteArray OpenKJEmbeddedApi::statusText(const int code)
             return "Unauthorized";
         case 404:
             return "Not Found";
+        case 413:
+            return "Payload Too Large";
+        case 431:
+            return "Request Header Fields Too Large";
         case 500:
             return "Internal Server Error";
         default:
@@ -1440,6 +1571,11 @@ bool OpenKJEmbeddedApi::ensureLocalModeSchema()
         "username_normalized TEXT PRIMARY KEY,"
         "username TEXT NOT NULL,"
         "password_hash BLOB NOT NULL,"
+        "password_salt BLOB,"
+        // Defaults describe a pre-PBKDF2 row, which is exactly what an existing
+        // table's rows are once the ALTER below backfills them.
+        "password_algo TEXT NOT NULL DEFAULT 'sha256',"
+        "password_iterations INTEGER NOT NULL DEFAULT 0,"
         "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
         "CREATE TABLE IF NOT EXISTS local_user_sessions ("
         "token TEXT PRIMARY KEY,"
@@ -1471,10 +1607,70 @@ bool OpenKJEmbeddedApi::ensureLocalModeSchema()
         }
     }
 
+    // Tables created before the PBKDF2 switch are missing the three columns the new
+    // scheme needs. This file manages its own schema rather than going through the
+    // PRAGMA user_version migrations in dbInit(), so the upgrade is done by hand.
+    QSet<QString> localUserColumns;
+    QSqlQuery columns;
+    if (columns.exec("PRAGMA table_info(local_users)")) {
+        while (columns.next()) {
+            localUserColumns.insert(columns.value(1).toString());
+        }
+    }
+    const QList<QPair<QString, QString>> passwordColumns{
+        {"password_salt", "BLOB"},
+        {"password_algo", "TEXT NOT NULL DEFAULT 'sha256'"},
+        {"password_iterations", "INTEGER NOT NULL DEFAULT 0"}
+    };
+    for (const auto &[name, definition] : passwordColumns) {
+        if (!localUserColumns.contains(name)) {
+            query.exec(QString("ALTER TABLE local_users ADD COLUMN %1 %2").arg(name, definition));
+        }
+    }
+
     query.exec("INSERT OR IGNORE INTO local_event_settings (settings_id, app_name, tagline) VALUES (1, 'OpenKJ', '')");
     query.exec("DELETE FROM local_user_sessions WHERE expires_at <= strftime('%s','now')");
     query.exec("DELETE FROM local_admin_sessions WHERE expires_at <= strftime('%s','now')");
     return true;
+}
+
+bool OpenKJEmbeddedApi::loginThrottled(int *retryAfterSecs)
+{
+    const auto entry = m_loginThrottle.constFind(m_currentClientKey);
+    if (entry == m_loginThrottle.constEnd()) {
+        return false;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now >= entry->lockedUntilMs) {
+        return false;
+    }
+    if (retryAfterSecs) {
+        *retryAfterSecs = static_cast<int>((entry->lockedUntilMs - now + 999) / 1000);
+    }
+    return true;
+}
+
+void OpenKJEmbeddedApi::noteLoginFailure()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    auto &entry = m_loginThrottle[m_currentClientKey];
+
+    // Failures only count as a run if they land close together, so a singer who
+    // fumbles their password once a week never accumulates a lockout.
+    if (entry.windowStartMs == 0 || now - entry.windowStartMs >= kLoginFailureWindowMs) {
+        entry.windowStartMs = now;
+        entry.failures = 0;
+    }
+    if (++entry.failures >= kLoginFailureLimit) {
+        entry.lockedUntilMs = now + kLoginLockoutMs;
+        entry.failures = 0;
+        entry.windowStartMs = now;
+    }
+}
+
+void OpenKJEmbeddedApi::clearLoginFailures()
+{
+    m_loginThrottle.remove(m_currentClientKey);
 }
 
 QString OpenKJEmbeddedApi::normalizeUsername(const QString &username)
@@ -1482,9 +1678,86 @@ QString OpenKJEmbeddedApi::normalizeUsername(const QString &username)
     return username.trimmed().toLower();
 }
 
-QByteArray OpenKJEmbeddedApi::hashPassword(const QString &password)
+QByteArray OpenKJEmbeddedApi::legacyHashPassword(const QString &password)
 {
     return QCryptographicHash::hash(password.trimmed().toUtf8(), QCryptographicHash::Sha256);
+}
+
+QByteArray OpenKJEmbeddedApi::derivePassword(const QString &password, const QByteArray &salt, const int iterations)
+{
+    // Trimmed to match the legacy scheme, so an upgraded account keeps accepting
+    // the password its owner has been typing all along.
+    return QPasswordDigestor::deriveKeyPbkdf2(QCryptographicHash::Sha256,
+                                              password.trimmed().toUtf8(),
+                                              salt,
+                                              iterations,
+                                              kPbkdf2KeyBytes);
+}
+
+QByteArray OpenKJEmbeddedApi::randomSalt()
+{
+    static_assert(kSaltBytes % sizeof(quint32) == 0, "Salt must be a whole number of 32-bit words");
+    // system() rather than global(): this seeds a credential, so it needs the OS
+    // CSPRNG and not the shared deterministic-seedable generator.
+    quint32 words[kSaltBytes / sizeof(quint32)];
+    QRandomGenerator::system()->fillRange(words);
+    return QByteArray(reinterpret_cast<const char *>(words), kSaltBytes);
+}
+
+// Compares in time independent of where the first difference falls. Overkill for a
+// LAN, but the alternative is leaking hash bytes to anything that can time us.
+bool OpenKJEmbeddedApi::constantTimeEquals(const QByteArray &a, const QByteArray &b)
+{
+    if (a.size() != b.size() || a.isEmpty()) {
+        return false;
+    }
+    quint8 diff = 0;
+    for (int i = 0; i < a.size(); ++i) {
+        diff |= static_cast<quint8>(a.at(i)) ^ static_cast<quint8>(b.at(i));
+    }
+    return diff == 0;
+}
+
+bool OpenKJEmbeddedApi::verifyPassword(const QString &normalizedUsername, const QString &password)
+{
+    QSqlQuery query;
+    query.prepare("SELECT password_hash, password_salt, password_algo, password_iterations "
+                  "FROM local_users WHERE username_normalized = :username");
+    query.bindValue(":username", normalizedUsername);
+    if (!query.exec() || !query.next()) {
+        return false;
+    }
+
+    const QByteArray stored = query.value(0).toByteArray();
+    const QByteArray salt = query.value(1).toByteArray();
+    const QString algo = query.value(2).toString();
+    const int iterations = query.value(3).toInt();
+
+    if (algo == QLatin1String("pbkdf2-sha256") && !salt.isEmpty() && iterations > 0) {
+        return constantTimeEquals(stored, derivePassword(password, salt, iterations));
+    }
+
+    // Legacy row. Verify the old way, then immediately re-store under the current
+    // scheme; after one login per user no unsalted hash is left in the database.
+    if (!constantTimeEquals(stored, legacyHashPassword(password))) {
+        return false;
+    }
+    storePassword(normalizedUsername, password);
+    return true;
+}
+
+bool OpenKJEmbeddedApi::storePassword(const QString &normalizedUsername, const QString &password)
+{
+    const QByteArray salt = randomSalt();
+    QSqlQuery update;
+    update.prepare("UPDATE local_users SET password_hash = :hash, password_salt = :salt, "
+                   "password_algo = 'pbkdf2-sha256', password_iterations = :iterations "
+                   "WHERE username_normalized = :username");
+    update.bindValue(":hash", derivePassword(password, salt, kPbkdf2Iterations));
+    update.bindValue(":salt", salt);
+    update.bindValue(":iterations", kPbkdf2Iterations);
+    update.bindValue(":username", normalizedUsername);
+    return update.exec();
 }
 
 QString OpenKJEmbeddedApi::createUserSession(const QString &normalizedUsername)
@@ -1569,12 +1842,17 @@ QJsonObject OpenKJEmbeddedApi::registerLocalUser(const QJsonObject &payload)
         return QJsonObject{{"ok", false}, {"error", "Username is already registered"}};
     }
 
+    const QByteArray salt = randomSalt();
     QSqlQuery insert;
-    insert.prepare("INSERT INTO local_users (username_normalized, username, password_hash) "
-                   "VALUES (:username_normalized, :username, :password_hash)");
+    insert.prepare("INSERT INTO local_users (username_normalized, username, password_hash, "
+                   "password_salt, password_algo, password_iterations) "
+                   "VALUES (:username_normalized, :username, :password_hash, "
+                   ":password_salt, 'pbkdf2-sha256', :password_iterations)");
     insert.bindValue(":username_normalized", normalized);
     insert.bindValue(":username", username);
-    insert.bindValue(":password_hash", hashPassword(password));
+    insert.bindValue(":password_hash", derivePassword(password, salt, kPbkdf2Iterations));
+    insert.bindValue(":password_salt", salt);
+    insert.bindValue(":password_iterations", kPbkdf2Iterations);
     if (!insert.exec()) {
         return QJsonObject{{"ok", false}, {"error", insert.lastError().text()}};
     }
@@ -1585,22 +1863,27 @@ QJsonObject OpenKJEmbeddedApi::registerLocalUser(const QJsonObject &payload)
 QJsonObject OpenKJEmbeddedApi::loginLocalUser(const QJsonObject &payload)
 {
     ensureLocalModeSchema();
+    int retryAfter = 0;
+    if (loginThrottled(&retryAfter)) {
+        return QJsonObject{{"ok", false},
+                           {"error", QString("Too many failed attempts. Try again in %1 seconds.").arg(retryAfter)},
+                           {"retryAfter", retryAfter}};
+    }
+
     const QString username = payload.value("username").toString().trimmed();
     const QString password = payload.value("password").toString();
     const QString normalized = normalizeUsername(username);
 
     QSqlQuery query;
-    query.prepare("SELECT username, password_hash FROM local_users WHERE username_normalized = :username");
+    query.prepare("SELECT username FROM local_users WHERE username_normalized = :username");
     query.bindValue(":username", normalized);
-    if (!query.exec() || !query.next()) {
+    const bool userExists = query.exec() && query.next();
+    if (!userExists || !verifyPassword(normalized, password)) {
+        noteLoginFailure();
         return QJsonObject{{"ok", false}, {"error", "Invalid username or password"}};
     }
 
-    const QByteArray expected = query.value(1).toByteArray();
-    if (expected != hashPassword(password)) {
-        return QJsonObject{{"ok", false}, {"error", "Invalid username or password"}};
-    }
-
+    clearLoginFailures();
     return QJsonObject{{"ok", true}, {"username", query.value(0).toString()}, {"token", createUserSession(normalized)}};
 }
 
@@ -1710,35 +1993,43 @@ QJsonObject OpenKJEmbeddedApi::updateLocalPassword(const QJsonObject &payload)
         return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
     }
 
-    QSqlQuery query;
-    query.prepare("SELECT password_hash FROM local_users WHERE username_normalized = :username");
-    query.bindValue(":username", currentNormalized);
-    if (!query.exec() || !query.next()) {
-        return QJsonObject{{"ok", false}, {"error", "Unknown user"}};
+    int retryAfter = 0;
+    if (loginThrottled(&retryAfter)) {
+        return QJsonObject{{"ok", false},
+                           {"error", QString("Too many failed attempts. Try again in %1 seconds.").arg(retryAfter)},
+                           {"retryAfter", retryAfter}};
     }
 
-    if (query.value(0).toByteArray() != hashPassword(payload.value("currentPassword").toString())) {
+    if (!verifyPassword(currentNormalized, payload.value("currentPassword").toString())) {
+        noteLoginFailure();
         return QJsonObject{{"ok", false}, {"error", "Current password is incorrect"}};
     }
+    clearLoginFailures();
 
     const QString nextPassword = payload.value("newPassword").toString();
     if (nextPassword.size() < 4) {
         return QJsonObject{{"ok", false}, {"error", "New password is too short"}};
     }
 
-    QSqlQuery update;
-    update.prepare("UPDATE local_users SET password_hash = :password_hash WHERE username_normalized = :username");
-    update.bindValue(":password_hash", hashPassword(nextPassword));
-    update.bindValue(":username", currentNormalized);
-    return QJsonObject{{"ok", update.exec()}};
+    return QJsonObject{{"ok", storePassword(currentNormalized, nextPassword)}};
 }
 
 QJsonObject OpenKJEmbeddedApi::loginAdmin(const QJsonObject &payload)
 {
+    int retryAfter = 0;
+    if (loginThrottled(&retryAfter)) {
+        return QJsonObject{{"ok", false},
+                           {"error", QString("Too many failed attempts. Try again in %1 seconds.").arg(retryAfter)},
+                           {"retryAfter", retryAfter}};
+    }
+
     const QString password = payload.value("password").toString();
     if (!m_settings.chkPassword(password)) {
+        noteLoginFailure();
         return QJsonObject{{"ok", false}, {"error", "Invalid admin password"}};
     }
+
+    clearLoginFailures();
     return QJsonObject{{"ok", true}, {"token", createAdminSession()}};
 }
 

@@ -1,5 +1,6 @@
 #include "gainlazyupdater.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include <QDir>
@@ -243,6 +244,9 @@ LazyGainUpdateController::LazyGainUpdateController(QObject *parent) : QObject(pa
 
 LazyGainUpdateController::~LazyGainUpdateController()
 {
+    // The final flush still has to write, but nothing downstream should be signalled
+    // during teardown - by this point the models it feeds may already be gone.
+    m_tearingDown = true;
     workerThread.requestInterruption();
     workerThread.quit();
     workerThread.wait();
@@ -263,6 +267,7 @@ void LazyGainUpdateController::seedQueue()
     if (m_stopped)
         return;
     m_logger->info("{} Finding songs with no loudness data", m_loggingPrefix);
+    refreshCounts();
 
     // Songs already waiting in the rotation go first - those are the ones whose gain the
     // KJ will actually hear tonight.
@@ -298,6 +303,32 @@ void LazyGainUpdateController::stopWork()
     m_stopped = true;
     m_pending.clear();
     m_pendingSet.clear();
+}
+
+// COUNT(gain) skips NULLs, so the two counts are "songs in the library" and "songs
+// already analyzed". One scan per 5000-song batch is not worth indexing around.
+void LazyGainUpdateController::refreshCounts()
+{
+    QSqlQuery query;
+    if (!query.exec("SELECT COUNT(*), COUNT(gain) FROM dbsongs") || !query.next())
+        return;
+    m_totalSongs = query.value(0).toInt();
+    m_analyzedSongs = query.value(1).toInt();
+    emit progressChanged(m_analyzedSongs, m_totalSongs);
+}
+
+void LazyGainUpdateController::reanalyze(const QString &path)
+{
+    QSqlQuery query;
+    query.prepare("UPDATE dbsongs SET gain = NULL WHERE path = :path");
+    query.bindValue(":path", path);
+    query.exec();
+
+    // Re-analysis is an explicit request, so it runs even when the background sweep
+    // has been stopped - otherwise the song would just sit there cleared.
+    m_stopped = false;
+    refreshCounts();
+    prioritize(QStringList{path});
 }
 
 void LazyGainUpdateController::setPlaybackActive(bool active)
@@ -403,4 +434,10 @@ void LazyGainUpdateController::flushPendingUpdates()
     }
     query.exec("COMMIT");
     m_logger->debug("{} Flushed {} gain updates to the database", m_loggingPrefix, batch.size());
+
+    if (m_tearingDown)
+        return;
+    m_analyzedSongs = std::min(m_analyzedSongs + static_cast<int>(batch.size()), m_totalSongs);
+    emit gotGains(batch);
+    emit progressChanged(m_analyzedSongs, m_totalSongs);
 }
