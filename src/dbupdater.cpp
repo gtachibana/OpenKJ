@@ -188,9 +188,13 @@ void DbUpdater::addFilesToDatabase(const QList<QString> &files)
             }
         }
         query.bindValue(":discid", parser.getSongId());
-        query.bindValue(":artist", parser.getArtist());
+        // Trimmed because the embedded API browses by first letter with a plain prefix
+        // LIKE on these columns so the index can seek; a leading space would drop the row
+        // out of its letter. Media tags in particular often carry stray whitespace.
+        query.bindValue(":artist", parser.getArtist().trimmed());
         // If metadata parse wasn't successful, just put the filename in the title field
-        query.bindValue(":title", (parser.parsedSuccessfully()) ? parser.getTitle() : fileInfo.completeBaseName());
+        query.bindValue(":title", (parser.parsedSuccessfully()) ? parser.getTitle().trimmed()
+                                                                : fileInfo.completeBaseName().trimmed());
         query.bindValue(":path", filePath);
         query.bindValue(":filename", fileInfo.completeBaseName());
         query.bindValue(":duration", duration);
