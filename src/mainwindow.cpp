@@ -668,6 +668,7 @@ MainWindow::MainWindow(QWidget *parent) :
     setMouseTracking(true);
     m_songShop = std::make_unique<SongShop>(this);
     m_lazyDurationUpdater = std::make_unique<LazyDurationUpdateController>(this);
+    m_lazyGainUpdater = std::make_unique<LazyGainUpdateController>(this);
     ui->tableViewBmPlaylist->setMouseTracking(true);
     m_historyTabWidget = ui->tabWidgetQueue->widget(1);
     ui->actionShow_Debug_Log->setChecked(m_settings.logShow());
@@ -797,6 +798,8 @@ MainWindow::MainWindow(QWidget *parent) :
     updateRotationDuration();
     if (m_settings.dbLazyLoadDurations())
         m_lazyDurationUpdater->getDurations();
+    if (m_settings.karaokeNormalizeLoudness())
+        m_lazyGainUpdater->getGains();
     ui->labelVolume->setPixmap(QIcon::fromTheme("player-volume").pixmap(QSize(22, 22)));
     ui->labelVolumeBm->setPixmap(QIcon::fromTheme("player-volume").pixmap(QSize(22, 22)));
     updateIcons();
@@ -1007,6 +1010,12 @@ void MainWindow::setupConnections() {
     connect(bmDbDialog.get(), &BmDbDialog::bmDbAboutToUpdate, this, &MainWindow::bmDatabaseAboutToUpdate);
     connect(&m_timerKaraokeAA, &QTimer::timeout, this, &MainWindow::karaokeAATimerTimeout);
     connect(ui->actionAutoplay_mode, &QAction::toggled, &m_settings, &Settings::setKaraokeAutoAdvance);
+    connect(&m_settings, &Settings::karaokeNormalizeLoudnessChanged, this, [&](bool enabled) {
+        if (enabled)
+            m_lazyGainUpdater->getGains();
+        else
+            m_lazyGainUpdater->stopWork();
+    });
 
 
     connect(ui->lineEdit, &CustomLineEdit::escapePressed, ui->lineEdit, &CustomLineEdit::clear);
@@ -1031,6 +1040,7 @@ void MainWindow::setupConnections() {
     connect(&m_qModel, &TableModelQueueSongs::queueModified, [&]() {
         updateRotationDuration();
         m_rotModel.layoutChanged();
+        prioritizeGainAnalysisForQueue();
     });
     // When a song is added to any queue, bump that singer ahead of singers with empty
     // queues, and optionally kick off autoplay if karaoke is idle. Queued so that the
@@ -1410,11 +1420,23 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
         query.exec("PRAGMA user_version = 107");
         m_logger->info("{} DB Schema update to v107 completed", m_loggingPrefix);
     }
+    if (schemaVersion < 108) {
+        m_logger->info("{} Updating database schema to version 108", m_loggingPrefix);
+        // ReplayGain track gain in dB. NULL means never analyzed, which is also what
+        // newly scanned songs get, so the lazy gain updater picks them up on its own.
+        query.exec("ALTER TABLE dbsongs ADD COLUMN gain REAL");
+        query.exec("PRAGMA user_version = 108");
+        m_logger->info("{} DB Schema update to v108 completed", m_loggingPrefix);
+    }
 }
 
 
 void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
     m_mediaTempDir = std::make_unique<QTemporaryDir>();
+    // Levels this track against the rest of the library. Songs the gain updater hasn't
+    // reached yet read back as 0 dB and play at their recorded level, same as before.
+    m_mediaBackendKar.setReplayGainFallback(
+            m_settings.karaokeNormalizeLoudness() ? storedGainDb(karaokeFilePath) : 0.0);
     if (m_mediaBackendKar.state() != MediaBackend::PausedState) {
         m_logger->info("{} Playing file: {}", m_loggingPrefix, karaokeFilePath.toStdString());
         if (m_mediaBackendKar.state() == MediaBackend::PlayingState) {
@@ -1561,6 +1583,7 @@ MainWindow::~MainWindow() {
     timeEndPeriod(1);
 #endif
     m_lazyDurationUpdater->stopWork();
+    m_lazyGainUpdater->stopWork();
     m_settings.bmSetVolume(ui->sliderBmVolume->value());
     m_settings.setAudioVolume(ui->sliderVolume->value());
     m_logger->info("{} Saving volumes - K: {} BM {}", m_loggingPrefix, m_settings.audioVolume(), m_settings.bmVolume());
@@ -1587,6 +1610,21 @@ void MainWindow::search() {
     m_karaokeSongsModel.search(ui->lineEdit->text());
 }
 
+// Moves songs waiting in singer queues to the front of the gain analysis work list.
+// Without this, a song added minutes before it gets sung would sit behind the rest of the
+// library and play unleveled.
+void MainWindow::prioritizeGainAnalysisForQueue() {
+    if (!m_settings.karaokeNormalizeLoudness())
+        return;
+    QStringList paths;
+    QSqlQuery query;
+    query.exec("SELECT DISTINCT dbsongs.path FROM queueSongs, dbsongs "
+               "WHERE queueSongs.song = dbsongs.songid AND queueSongs.played = 0 AND dbsongs.gain IS NULL");
+    while (query.next())
+        paths.append(query.value(0).toString());
+    m_lazyGainUpdater->prioritize(paths);
+}
+
 void MainWindow::databaseUpdated() {
     m_karaokeSongsModel.loadData();
     search();
@@ -1598,10 +1636,18 @@ void MainWindow::databaseUpdated() {
     connect(m_lazyDurationUpdater.get(), &LazyDurationUpdateController::gotDurations, &m_karaokeSongsModel,
             &TableModelKaraokeSongs::setSongDurations);
     m_lazyDurationUpdater->getDurations();
+    // Songs added by the update come in with a null gain, so re-seed the queue to pick
+    // them up rather than leaving them unanalyzed until the next launch.
+    m_lazyGainUpdater->stopWork();
+    m_lazyGainUpdater = std::make_unique<LazyGainUpdateController>(this);
+    m_lazyGainUpdater->setPlaybackActive(m_mediaBackendKar.state() == MediaBackend::PlayingState);
+    if (m_settings.karaokeNormalizeLoudness())
+        m_lazyGainUpdater->getGains();
 }
 
 void MainWindow::databaseCleared() {
     m_lazyDurationUpdater->stopWork();
+    m_lazyGainUpdater->stopWork();
     m_karaokeSongsModel.loadData();
     m_rotModel.loadData();
     m_qModel.loadSinger(-1);
@@ -2081,6 +2127,9 @@ void MainWindow::karaokeMediaBackend_durationChanged(const qint64 &duration) {
 void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &state) {
     if (m_shuttingDown)
         return;
+    // Gain analysis decodes at full speed, so keep it off the CPU while a song is on
+    // screen. Set before the early returns below so it can't be skipped.
+    m_lazyGainUpdater->setPlaybackActive(state == MediaBackend::PlayingState);
     if (state == MediaBackend::StoppedState) {
         m_logger->info("{} MainWindow - audio backend state is now STOPPED", m_loggingPrefix);
         if (ui->labelTotalTime->text() == "0:00") {

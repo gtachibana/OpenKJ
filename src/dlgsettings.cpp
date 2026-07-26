@@ -199,6 +199,7 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     ui->lineEditSlideshowDir->setText(m_settings.bgSlideShowDir());
     ui->checkBoxFader->setChecked(m_settings.audioUseFader());
     ui->checkBoxDownmix->setChecked(m_settings.audioDownmix());
+    ui->checkBoxNormalizeLoudness->setChecked(m_settings.karaokeNormalizeLoudness());
     ui->checkBoxSilenceDetection->setChecked(m_settings.audioDetectSilence());
     ui->checkBoxFaderBm->setChecked(m_settings.audioUseFaderBm());
     ui->checkBoxDownmixBm->setChecked(m_settings.audioDownmixBm());
@@ -692,6 +693,12 @@ void DlgSettings::on_checkBoxDownmix_toggled(bool checked) {
         return;
     m_settings.setAudioDownmix(checked);
     emit audioDownmixChanged(checked);
+}
+
+void DlgSettings::on_checkBoxNormalizeLoudness_toggled(bool checked) {
+    if (!m_pageSetupDone)
+        return;
+    m_settings.setKaraokeNormalizeLoudness(checked);
 }
 
 void DlgSettings::on_checkBoxDownmixBm_toggled(bool checked) {

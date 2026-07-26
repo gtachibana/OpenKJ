@@ -478,6 +478,7 @@ set(SOURCE_FILES
         src/soundfxbutton.cpp
         src/runguard/runguard.cpp
         src/durationlazyupdater.cpp
+        src/gainlazyupdater.cpp
         src/idledetect.cpp
         src/mainwindow.h
         src/dlgaddsong.h
@@ -543,6 +544,7 @@ set(SOURCE_FILES
         src/runguard/runguard.h
         src/models/tableviewtooltipfilter.h
         src/durationlazyupdater.h
+        src/gainlazyupdater.h
         src/idledetect.h
         src/mainwindow.ui
         src/dlgaddsong.ui

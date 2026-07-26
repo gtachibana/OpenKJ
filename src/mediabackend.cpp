@@ -850,7 +850,7 @@ void MediaBackend::buildAudioSinkBin()
     m_fader->setVolumeElement(m_faderVolumeElement);
     auto aConvInput = gst_element_factory_make("audioconvert", "aConvInput");
     m_audioSink = gst_element_factory_make("autoaudiosink", "autoAudioSink");
-    auto rgVolume = gst_element_factory_make("rgvolume", "rgVolume");
+    m_rgVolume = gst_element_factory_make("rgvolume", "rgVolume");
     auto level = gst_element_factory_make("level", "level");
     m_equalizer = gst_element_factory_make("equalizer-10bands", "equalizer");
     m_bus = gst_element_get_bus(m_pipeline);
@@ -872,8 +872,8 @@ void MediaBackend::buildAudioSinkBin()
 
     GstElement *audioBinLastElement;
 
-    gst_bin_add_many(GST_BIN(m_audioBin), queueMainAudio, audioResample, m_audioPanorama, level, m_scaleTempo, aConvInput, rgVolume, /*rgLimiter,*/ m_volumeElement, m_equalizer, aConvPostPanorama, m_fltrPostPanorama, m_faderVolumeElement, nullptr);
-    gst_element_link_many(queueMainAudio, aConvInput, audioResample, rgVolume, /*rgLimiter,*/ m_scaleTempo, level, m_equalizer, m_audioPanorama, aConvPostPanorama, audioBinLastElement = m_fltrPostPanorama, nullptr);
+    gst_bin_add_many(GST_BIN(m_audioBin), queueMainAudio, audioResample, m_audioPanorama, level, m_scaleTempo, aConvInput, m_rgVolume, /*rgLimiter,*/ m_volumeElement, m_equalizer, aConvPostPanorama, m_fltrPostPanorama, m_faderVolumeElement, nullptr);
+    gst_element_link_many(queueMainAudio, aConvInput, audioResample, m_rgVolume, /*rgLimiter,*/ m_scaleTempo, level, m_equalizer, m_audioPanorama, aConvPostPanorama, audioBinLastElement = m_fltrPostPanorama, nullptr);
 
     if (m_loadPitchShift)
     {
@@ -922,7 +922,12 @@ void MediaBackend::buildAudioSinkBin()
     gst_element_add_pad(m_audioBin, ghostPad);
     gst_object_unref(pad);
 
-    g_object_set(rgVolume, "album-mode", false, nullptr);
+    g_object_set(m_rgVolume, "album-mode", false, nullptr);
+    // rgvolume has always been in the pipeline but did nothing, because karaoke rips
+    // carry no ReplayGain tags. The fallback gain is what makes it useful: it is applied
+    // whenever the stream has no tags of its own, and MainWindow sets it per track from
+    // the value the lazy gain updater measured.
+    g_object_set(m_rgVolume, "fallback-gain", m_replayGainFallback, nullptr);
     g_object_set(level, "message", TRUE, nullptr);
     setVolume(m_volume);
     m_timerSlow.start(1000);
@@ -1098,6 +1103,18 @@ void MediaBackend::setDownmix(const bool &enabled)
 {
     m_downmix = enabled;
     g_object_set(m_fltrPostPanorama, "caps", (enabled) ? m_audioCapsMono : m_audioCapsStereo, nullptr);
+}
+
+void MediaBackend::setReplayGainFallback(const double &gainDb)
+{
+    if (m_replayGainFallback == gainDb)
+        return;
+    m_logger->debug("{} Setting ReplayGain fallback to {} dB", m_loggingPrefix, gainDb);
+    m_replayGainFallback = gainDb;
+    // The pipeline is rebuilt on device changes, so the value is stashed either way and
+    // reapplied by buildAudioSinkBin().
+    if (m_rgVolume)
+        g_object_set(m_rgVolume, "fallback-gain", gainDb, nullptr);
 }
 
 void MediaBackend::setTempo(const int &percent)

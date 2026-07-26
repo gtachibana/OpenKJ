@@ -163,6 +163,7 @@ private:
     GstElement *m_pitchShifterSoundtouch { nullptr };
     GstElement *m_volumeElement { nullptr };
     GstElement *m_faderVolumeElement { nullptr };
+    GstElement *m_rgVolume { nullptr };
     GstElement *m_equalizer { nullptr };
     GstElement *m_audioSink { nullptr };
     GstElement *m_prescalerCapsFilter { nullptr };
@@ -200,6 +201,7 @@ private:
     qint64 m_lastReportedDuration{-1};
 
     double m_playbackRate{1.0};
+    double m_replayGainFallback{0.0};
     int m_volume{0};
     int m_lastPosition{0};
     AudioOutputDevice m_outputDevice;
@@ -263,6 +265,10 @@ public slots:
     void fadeInImmediate();
     void fadeOutImmediate();
     void setEnforceAspectRatio(const bool &enforce);
+    // Loudness adjustment in dB applied to the next track loaded, for media that carries
+    // no ReplayGain tags of its own - which is nearly every karaoke rip. Pass 0 to leave
+    // the track at its recorded level. Set this before setMedia()/setMediaCdg().
+    void setReplayGainFallback(const double &gainDb);
 
 signals:
     void audioAvailableChanged(const bool audioAvailable);
