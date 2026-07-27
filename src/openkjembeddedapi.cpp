@@ -2105,6 +2105,13 @@ QJsonObject OpenKJEmbeddedApi::removeOwnRequest(const QJsonObject &payload)
 
 QJsonObject OpenKJEmbeddedApi::runAdminActionRest(const QJsonObject &payload)
 {
+    // Same session token /local/auth/login hands out, carried the way every other
+    // /local POST carries it. Without this any device on the LAN can skip songs,
+    // reorder the queue or close requests.
+    if (!isValidAdminSession(payload.value("token").toString().trimmed())) {
+        return QJsonObject{{"ok", false}, {"error", "Admin authentication required"}};
+    }
+
     QJsonObject legacyPayload;
     legacyPayload.insert("action", payload.value("type").toString());
     if (payload.contains("entryId")) {
