@@ -26,8 +26,17 @@ public:
     bool start(quint16 port = 5050, const QHostAddress &address = QHostAddress::Any);
     void stop();
 
+public slots:
+    // Keeps the API's idea of the current key in step with the pipeline. Needed
+    // because queuesongs.keychg is not authoritative while a song plays - the KJ can
+    // move the desktop spinbox, which retunes without touching the database.
+    void setLivePitch(int semitones);
+
 signals:
     void songSubmitted();
+    // Asks MainWindow to retune the running karaoke pipeline. The API has no handle
+    // on the media backend, and only MainWindow can keep the KJ's spinbox in step.
+    void pitchChangeRequested(int semitones);
 
 private:
     struct HttpRequest
@@ -84,6 +93,9 @@ private:
     // Safe because handling is synchronous and single-threaded.
     QString m_currentClientKey;
     QHash<QString, LoginThrottle> m_loginThrottle;
+
+    // Live pipeline key, fed by setLivePitch(). Authoritative while a song plays.
+    int m_livePitch{0};
 
     void onNewConnection();
     void onSocketReadyRead();
@@ -163,6 +175,15 @@ private:
     QJsonObject removeOwnRequest(const QJsonObject &payload);
     QJsonObject moveOwnRequest(const QJsonObject &payload);
     QJsonObject setOwnAway(const QJsonObject &payload);
+    // Nudges the key of the song the caller is singing right now by one semitone.
+    // Relative rather than absolute so a stale client cannot yank the pitch away
+    // from wherever the KJ has just put it.
+    QJsonObject setOwnSongKey(const QJsonObject &payload);
+    // qsongid of the entry currently being sung, or -1. Unlike the queue entries the
+    // other user routes touch, this row has played = 1.
+    int nowPlayingQueueSongId(QString *singerName = nullptr, int *songId = nullptr) const;
+    void rememberUserSongKey(const QString &normalizedUsername, int songId, int keyChange);
+    int preferredUserSongKey(const QString &normalizedUsername, int songId) const;
     // True when the queue entry belongs to this user, either by ownership
     // record or - for songs the KJ added on their behalf - by singer name.
     bool userOwnsRequest(int requestId, const QString &normalizedUsername, QString *error) const;

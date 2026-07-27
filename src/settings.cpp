@@ -1913,6 +1913,16 @@ void Settings::setCdgRemainEnabled(bool enabled)
     settings->setValue("cdgRemainEnabled", enabled);
 }
 
+bool Settings::cdgPitchCueEnabled()
+{
+    return settings->value("cdgPitchCueEnabled", true).toBool();
+}
+
+void Settings::setCdgPitchCueEnabled(bool enabled)
+{
+    settings->setValue("cdgPitchCueEnabled", enabled);
+}
+
 int Settings::lastRunRotationTopSingerId() {
     return settings->value("lastRunRotationTopSingerId", -1).toInt();
 }

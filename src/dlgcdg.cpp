@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QImageReader>
 #include <QWindow>
+#include <algorithm>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -49,6 +50,9 @@ DlgCdg::DlgCdg(MediaBackend &KaraokeBackend, MediaBackend &BreakBackend, QWidget
     m_tWidget->setObjectName("DurationTimer");
     m_tWidget->show();
     m_tWidget->move(m_settings.durationPosition());
+    m_pitchCue = std::make_unique<PitchCueWidget>(this);
+    m_pitchCue->setObjectName("PitchCue");
+    m_pitchCue->hide();
     ui->videoDisplayKar->setFillOnPaint(false);
     ui->widgetAlert->setAutoFillBackground(true);
     ui->fsToggleWidget->hide();
@@ -224,6 +228,25 @@ void DlgCdg::timerCountdownTimeout()
     ui->lblSeconds->setText(tr("Starts in: ") + QString::number(m_countdownPos) + tr(" seconds"));
     ui->lblSeconds->repaint();
     ui->widgetAlert->repaint();
+}
+
+void DlgCdg::showPitchCue(const int semitones, const bool up)
+{
+    if (!m_settings.cdgPitchCueEnabled())
+        return;
+
+    // Sized and placed on every cue rather than in a resizeEvent - the badge is only
+    // on screen for a couple of seconds, and this keeps DlgCdg's geometry handling
+    // (which fullscreen transitions already make delicate) untouched.
+    QFont font = m_settings.cdgRemainFont();
+    font.setPointSize(std::max(font.pointSize(), 24));
+    font.setBold(true);
+    m_pitchCue->setTextFont(font);
+
+    const int margin = std::max(12, width() / 40);
+    m_pitchCue->move(width() - m_pitchCue->width() - margin, margin);
+    m_pitchCue->raise();
+    m_pitchCue->showCue(semitones, up);
 }
 
 void DlgCdg::alertBgColorChanged(const QColor &color)
@@ -516,4 +539,74 @@ void TransparentWidget::setTextFont(const QFont &font) {
 
 void TransparentWidget::resetPosition() {
     move(0,0);
+}
+
+PitchCueWidget::PitchCueWidget(QWidget *parent)
+        : QWidget(parent)
+{
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setFocusPolicy(Qt::NoFocus);
+    m_font = font();
+    m_fadeTimer.setInterval(c_tickMs);
+    connect(&m_fadeTimer, &QTimer::timeout, this, &PitchCueWidget::onFadeTick);
+}
+
+void PitchCueWidget::setTextFont(const QFont &font)
+{
+    m_font = font;
+    const QFontMetrics metrics(m_font);
+    // Widest string the badge can hold ("-12" plus the arrow), so a cue never
+    // reflows or clips as the singer walks the key up and down.
+    const int textWidth = metrics.horizontalAdvance(QString(c_arrowUp) + " -12");
+    setFixedSize(textWidth + metrics.height(), metrics.height() + metrics.height() / 2);
+}
+
+void PitchCueWidget::showCue(const int semitones, const bool up)
+{
+    m_text = QString("%1 %2%3")
+                     .arg(up ? c_arrowUp : c_arrowDown)
+                     .arg(semitones > 0 ? QStringLiteral("+") : QStringLiteral(""))
+                     .arg(semitones);
+    m_elapsedMs = 0;
+    m_opacity = 1.0;
+    show();
+    raise();
+    update();
+    m_fadeTimer.start();
+}
+
+void PitchCueWidget::onFadeTick()
+{
+    m_elapsedMs += c_tickMs;
+    if (m_elapsedMs <= c_holdMs) {
+        return;
+    }
+    const int fadeElapsed = m_elapsedMs - c_holdMs;
+    if (fadeElapsed >= c_fadeMs) {
+        m_fadeTimer.stop();
+        m_opacity = 0.0;
+        hide();
+        return;
+    }
+    m_opacity = 1.0 - (static_cast<qreal>(fadeElapsed) / c_fadeMs);
+    update();
+}
+
+void PitchCueWidget::paintEvent(QPaintEvent *)
+{
+    if (m_text.isEmpty())
+        return;
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setOpacity(m_opacity);
+
+    const qreal radius = height() / 4.0;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 0xb0));
+    painter.drawRoundedRect(rect(), radius, radius);
+
+    painter.setFont(m_font);
+    painter.setPen(QColor(0xff, 0xff, 0xff));
+    painter.drawText(rect(), Qt::AlignCenter, m_text);
 }

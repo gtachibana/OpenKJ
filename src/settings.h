@@ -143,6 +143,8 @@ public:
     QColor tickerTextColor();
     void setTickerTextColor(QColor color);
     bool cdgRemainEnabled();
+    bool cdgPitchCueEnabled();
+    void setCdgPitchCueEnabled(bool enabled);
     QColor tickerBgColor();
     void setTickerBgColor(QColor color);
     bool tickerFullRotation();

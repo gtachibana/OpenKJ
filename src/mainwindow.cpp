@@ -829,6 +829,9 @@ MainWindow::MainWindow(QWidget *parent) :
     setupConnections();
 
     connect(&m_embeddedApi, &OpenKJEmbeddedApi::songSubmitted, this, &MainWindow::startAutoPlayIfIdle);
+    connect(&m_embeddedApi, &OpenKJEmbeddedApi::pitchChangeRequested, this, &MainWindow::applyApiPitchChange);
+    connect(&m_mediaBackendKar, &MediaBackend::pitchChanged, &m_embeddedApi, &OpenKJEmbeddedApi::setLivePitch);
+    connect(&m_mediaBackendKar, &MediaBackend::pitchChanged, this, &MainWindow::karaokeMediaBackend_pitchChanged);
 
     if (m_settings.appMode() == Settings::LocalMode && m_settings.embeddedApiEnabled()) {
         const QHostAddress bindAddress(m_settings.embeddedApiBindAddress());
@@ -2163,6 +2166,28 @@ void MainWindow::spinBoxKeyValueChanged(const int &arg1) {
     QTimer::singleShot(20, [&]() {
         ui->spinBoxKey->findChild<QLineEdit *>()->deselect();
     });
+}
+
+void MainWindow::applyApiPitchChange(const int semitones) {
+    // Driven through the spinbox rather than straight to setPitchShift so the KJ's
+    // display follows a key the singer changed from their phone.
+    ui->spinBoxKey->setValue(std::clamp(semitones, -12, 12));
+}
+
+void MainWindow::karaokeMediaBackend_pitchChanged(const int semitones) {
+    // setPitchShift() runs on every song load, so this fires with the new song's
+    // stored key before anyone has touched anything. Only a change made into a song
+    // already in progress is worth putting on the singer screen.
+    if (m_mediaBackendKar.state() != MediaBackend::PlayingState || m_mediaBackendKar.position() < 2000) {
+        m_lastCuedPitch = semitones;
+        return;
+    }
+    if (semitones == m_lastCuedPitch)
+        return;
+
+    const bool up = semitones > m_lastCuedPitch;
+    m_lastCuedPitch = semitones;
+    cdgWindow->showPitchCue(semitones, up);
 }
 
 void MainWindow::karaokeMediaBackend_positionChanged(const qint64 &position) {
