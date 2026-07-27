@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QRandomGenerator>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStringList>
@@ -514,6 +515,22 @@ QJsonObject OpenKJEmbeddedApi::handleApiCommand(const QJsonObject &payload)
         return out;
     }
 
+    // Commands that mutate show state need the admin session token /local/auth/login
+    // issues. Gating here rather than inside each command handler keeps the two
+    // dispatchers - this one and handleLocalApiPost() - as the only places auth is
+    // decided, so a new privileged command can't be added without passing through it.
+    static const QSet<QString> privilegedCommands{
+        "adminAction", "setAccepting", "setEventSettings", "deleteRequest", "clearRequests"};
+    if (privilegedCommands.contains(command) &&
+        !isValidAdminSession(payload.value("token").toString().trimmed())) {
+        // Callers of this envelope read either shape depending on the command
+        // (getEventSettings answers with "ok", the rest with "error"), so answer both.
+        return QJsonObject{{"command", command},
+                           {"error", "true"},
+                           {"errorString", "Admin authentication required"},
+                           {"ok", false}};
+    }
+
     if (command == "connectionTest") {
         QJsonObject out;
         out.insert("command", command);
@@ -583,10 +600,6 @@ QJsonObject OpenKJEmbeddedApi::handleApiCommand(const QJsonObject &payload)
     }
 
     if (command == "setEventSettings") {
-        if (!isValidAdminSession(payload.value("token").toString().trimmed())) {
-            return QJsonObject{{"ok", false}, {"error", "Admin authentication required"}};
-        }
-
         const QString appName = payload.value("appName").toString().trimmed();
         const QString tagline = payload.value("tagline").toString().trimmed();
         QSqlQuery query;
@@ -1018,6 +1031,17 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiGet(const QString &path, const QUrlQ
 
 QByteArray OpenKJEmbeddedApi::handleLocalApiPost(const QString &path, const QJsonObject &payload)
 {
+    // The admin-only half of this dispatcher, gated the same way and on the same
+    // token as the privileged commands in handleApiCommand(). The user routes below
+    // are not listed here: they authorize a specific singer against their own queue
+    // entry, which only the individual handler can decide.
+    static const QSet<QString> adminPaths{"/local/admin/action", "/local/event-settings"};
+    if (adminPaths.contains(path) && !isValidAdminSession(payload.value("token").toString().trimmed())) {
+        // 200 + ok:false, matching how every other auth failure on this surface answers -
+        // a client that throws on non-2xx would swallow the message.
+        return jsonResponse(200, QJsonObject{{"ok", false}, {"error", "Admin authentication required"}});
+    }
+
     if (path == "/local/user/register") {
         return jsonResponse(200, registerLocalUser(payload));
     }
@@ -2105,13 +2129,6 @@ QJsonObject OpenKJEmbeddedApi::removeOwnRequest(const QJsonObject &payload)
 
 QJsonObject OpenKJEmbeddedApi::runAdminActionRest(const QJsonObject &payload)
 {
-    // Same session token /local/auth/login hands out, carried the way every other
-    // /local POST carries it. Without this any device on the LAN can skip songs,
-    // reorder the queue or close requests.
-    if (!isValidAdminSession(payload.value("token").toString().trimmed())) {
-        return QJsonObject{{"ok", false}, {"error", "Admin authentication required"}};
-    }
-
     QJsonObject legacyPayload;
     legacyPayload.insert("action", payload.value("type").toString());
     if (payload.contains("entryId")) {
