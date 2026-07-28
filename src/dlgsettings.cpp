@@ -369,9 +369,16 @@ void DlgSettings::setupModeWidgets()
     m_spinBoxEmbeddedPort = new QSpinBox(m_groupBoxLocalMode);
     m_spinBoxEmbeddedPort->setRange(1, 65535);
     m_spinBoxEmbeddedPort->setValue(m_settings.embeddedApiPort());
+    m_spinBoxUpNextTurns = new QSpinBox(m_groupBoxLocalMode);
+    m_spinBoxUpNextTurns->setRange(0, 5);
+    m_spinBoxUpNextTurns->setValue(m_settings.embeddedApiUpNextTurns());
+    m_spinBoxUpNextTurns->setSpecialValueText(tr("Off"));
+    m_spinBoxUpNextTurns->setSuffix(tr(" turn(s) away"));
+    m_spinBoxUpNextTurns->setToolTip(tr("Push an alert to a singer's phone when they get this close to the mic."));
     localLayout->addRow(tr("Karaoke UI URL"), m_lineEditLocalUiUrl);
     localLayout->addRow(tr("Embedded API bind"), m_lineEditEmbeddedBindAddress);
     localLayout->addRow(tr("Embedded API port"), m_spinBoxEmbeddedPort);
+    localLayout->addRow(tr("Up next alert"), m_spinBoxUpNextTurns);
     networkLayout->insertWidget(1, m_groupBoxLocalMode);
 
     connect(m_comboAppMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [&](int index) {
@@ -386,6 +393,7 @@ void DlgSettings::setupModeWidgets()
         m_lineEditLocalUiUrl->setText(m_settings.localUiUrl());
         m_lineEditEmbeddedBindAddress->setText(m_settings.embeddedApiBindAddress());
         m_spinBoxEmbeddedPort->setValue(m_settings.embeddedApiPort());
+        m_spinBoxUpNextTurns->setValue(m_settings.embeddedApiUpNextTurns());
         refreshNetworkModeUi();
         emit appModeChanged(mode);
     });
@@ -397,6 +405,9 @@ void DlgSettings::setupModeWidgets()
     });
     connect(m_spinBoxEmbeddedPort, qOverload<int>(&QSpinBox::valueChanged), this, [&](int port) {
         m_settings.setEmbeddedApiPort(port);
+    });
+    connect(m_spinBoxUpNextTurns, qOverload<int>(&QSpinBox::valueChanged), this, [&](int turns) {
+        m_settings.setEmbeddedApiUpNextTurns(turns);
     });
 }
 

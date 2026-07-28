@@ -106,6 +106,7 @@ void OpenKJEmbeddedApi::stop()
     m_sseRefreshTimer.stop();
     m_idleSweepTimer.stop();
     m_sseClients.clear();
+    m_upNextNotified.clear();
 
     for (QTcpSocket *socket : m_connections.keys()) {
         socket->disconnectFromHost();
@@ -289,6 +290,91 @@ void OpenKJEmbeddedApi::broadcastSseSnapshot()
     const auto clients = m_sseClients;
     for (QTcpSocket *socket : clients) {
         writeSseFrame(socket, "queue", data);
+    }
+
+    evaluateUpNext();
+}
+
+// The snapshot already carries turns_until, so a phone could in principle work this
+// out for itself - but it would have to diff consecutive frames, and the 20 s
+// keepalive and every reconnect replay the same numbers. Detecting the edge here
+// instead means it is found once, against state the server already holds, and a
+// singer gets told exactly once per turn no matter how their phone behaves.
+void OpenKJEmbeddedApi::evaluateUpNext()
+{
+    const int threshold = m_settings.embeddedApiUpNextTurns();
+    if (threshold <= 0) {
+        m_upNextNotified.clear();
+        return;
+    }
+
+    QSqlQuery query;
+    query.prepare(
+        "SELECT rs.name, rs.position, qs.qsongid, d.songid, d.artist, d.title, COALESCE(d.duration, 0) "
+        "FROM queuesongs qs "
+        "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
+        "INNER JOIN dbsongs d ON d.songid = qs.song "
+        // Someone who marked themselves away gets skipped in the rotation, so paging
+        // them to the mic would be wrong.
+        "WHERE qs.played = 0 AND qs.singer != :nowSinger AND COALESCE(rs.paused, 0) = 0 "
+        "ORDER BY rs.position ASC, qs.position ASC");
+    query.bindValue(":nowSinger", currentSingerId());
+    if (!query.exec()) {
+        return;
+    }
+
+    QSet<QString> seen;
+    QSet<QString> inWindow;
+    QList<QJsonObject> alerts;
+    while (query.next()) {
+        const QString singer = query.value(0).toString();
+        // First row per singer wins: the ORDER BY puts their next song first, and
+        // that is the one the alert should name.
+        if (seen.contains(singer)) {
+            continue;
+        }
+        seen.insert(singer);
+
+        const int position = query.value(1).toInt();
+        const int turns = m_rotationModel.positionTurnDistance(position);
+        // 0 means they are the singer at the mic. The query excludes that singer by
+        // id, but the model's idea of who is current can lag the setting by a beat.
+        if (turns <= 0 || turns > threshold) {
+            continue;
+        }
+
+        inWindow.insert(singer);
+        if (m_upNextNotified.contains(singer)) {
+            continue;
+        }
+        alerts.append(QJsonObject{
+            {"singer", singer},
+            {"turns_until", turns},
+            {"wait_seconds", m_rotationModel.positionWaitTime(position)},
+            {"request_id", query.value(2).toInt()},
+            {"song_id", query.value(3).toInt()},
+            {"artist", query.value(4).toString()},
+            {"title", query.value(5).toString()},
+            {"duration_seconds", std::max(1, query.value(6).toInt() / 1000)}
+        });
+    }
+
+    m_upNextNotified = inWindow;
+    if (alerts.isEmpty()) {
+        return;
+    }
+
+    // Fanned out to every subscriber rather than to one singer: the stream carries
+    // no identity, and the queue snapshot on the same connection already names
+    // everyone in the rotation, so this adds nothing a client could not read there.
+    // The client raises a notification only when "singer" is the user it logged in as.
+    const auto clients = m_sseClients;
+    for (const QJsonObject &alert : alerts) {
+        ++m_sseEventId;
+        const QByteArray data = QJsonDocument(alert).toJson(QJsonDocument::Compact);
+        for (QTcpSocket *socket : clients) {
+            writeSseFrame(socket, "upnext", data);
+        }
     }
 }
 
@@ -1371,7 +1457,12 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"supportsAwayToggle", true},
         {"supportsReorderOwnQueue", true},
         {"supportsEventStream", true},
-        {"eventStreamPath", "/local/events"}
+        {"eventStreamPath", "/local/events"},
+        {"supportsUpNextEvents", true},
+        {"upNextEventName", "upnext"},
+        // 0 when the KJ has turned the alerts off, so a client can hide the
+        // notification opt-in rather than offer one that will never fire.
+        {"upNextTurns", m_settings.embeddedApiUpNextTurns()}
     };
 }
 

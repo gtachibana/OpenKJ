@@ -267,9 +267,13 @@ public:
     int embeddedApiSerial();
     int embeddedApiPort();
     QString embeddedApiBindAddress();
+    // How many turns ahead of the mic a singer gets an "up next" event pushed to
+    // their phone. 0 turns the events off entirely.
+    int embeddedApiUpNextTurns();
     void setEmbeddedApiEnabled(bool enabled);
     void setEmbeddedApiPort(int port);
     void setEmbeddedApiBindAddress(const QString &address);
+    void setEmbeddedApiUpNextTurns(int turns);
     QString localUiUrl();
     void setLocalUiUrl(const QString &url);
     bool bmKCrossFade();

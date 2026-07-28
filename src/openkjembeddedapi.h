@@ -87,6 +87,12 @@ private:
     QTimer m_idleSweepTimer;
     quint64 m_sseEventId{0};
 
+    // Singers already told they are coming up, so a redraw, a keepalive tick, or a
+    // phone reconnecting does not ping the same person twice. A name leaves the set
+    // once the singer leaves the alert window - taking the mic does that - which
+    // re-arms them for their next turn around the rotation.
+    QSet<QString> m_upNextNotified;
+
     // Peer address of the request currently being handled. The handlers are plain
     // JSON-in/JSON-out functions with no socket access, and only the auth ones care
     // who is calling; stashing it here beats threading it through every signature.
@@ -105,6 +111,9 @@ private:
     void beginEventStream(QTcpSocket *socket);
     void scheduleSseBroadcast();
     void broadcastSseSnapshot();
+    // Finds singers who have just come within the KJ's alert window and pushes one
+    // "upnext" frame for each. Runs off the back of every snapshot broadcast.
+    void evaluateUpNext();
     void writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data);
 
     void sendErrorAndClose(QTcpSocket *socket, int statusCode, const QString &message);

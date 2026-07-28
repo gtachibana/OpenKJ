@@ -62,6 +62,7 @@ private:
     QLineEdit *m_lineEditLocalUiUrl{nullptr};
     QLineEdit *m_lineEditEmbeddedBindAddress{nullptr};
     QSpinBox *m_spinBoxEmbeddedPort{nullptr};
+    QSpinBox *m_spinBoxUpNextTurns{nullptr};
     void setupModeWidgets();
     void refreshNetworkModeUi();
     void setupHotkeysForm();
