@@ -2099,12 +2099,26 @@ QJsonObject OpenKJEmbeddedApi::updateLocalUsername(const QJsonObject &payload)
     updateRequests.bindValue(":current_normalized", currentNormalized);
     const bool requestsOk = updateRequests.exec();
 
+    // OR REPLACE on both of these: they are keyed on (username_normalized, song_id),
+    // and the ON DELETE CASCADE in their schema never fires because nothing turns on
+    // PRAGMA foreign_keys - so rows orphaned by an earlier rename can still be
+    // sitting under the name being moved into. Without it the primary key collides,
+    // allOk goes false, and the singer is told the rename failed for no visible
+    // reason. Dropping the orphan is the right resolution: the live user's own
+    // preferences win.
     QSqlQuery updateFavorites;
-    updateFavorites.prepare("UPDATE local_user_favorites SET username_normalized = :next_normalized "
+    updateFavorites.prepare("UPDATE OR REPLACE local_user_favorites SET username_normalized = :next_normalized "
                             "WHERE username_normalized = :current_normalized");
     updateFavorites.bindValue(":next_normalized", nextNormalized);
     updateFavorites.bindValue(":current_normalized", currentNormalized);
     const bool favoritesOk = updateFavorites.exec();
+
+    QSqlQuery updateSongKeys;
+    updateSongKeys.prepare("UPDATE OR REPLACE local_user_song_keys SET username_normalized = :next_normalized "
+                           "WHERE username_normalized = :current_normalized");
+    updateSongKeys.bindValue(":next_normalized", nextNormalized);
+    updateSongKeys.bindValue(":current_normalized", currentNormalized);
+    const bool songKeysOk = updateSongKeys.exec();
 
     // Sung-song history is keyed by rotation singer name, which for a local
     // user is their username. Carry it across so a rename doesn't orphan it.
@@ -2122,7 +2136,7 @@ QJsonObject OpenKJEmbeddedApi::updateLocalUsername(const QJsonObject &payload)
         renameHistorySinger.exec();
     }
 
-    const bool allOk = userOk && sessionsOk && requestsOk && favoritesOk;
+    const bool allOk = userOk && sessionsOk && requestsOk && favoritesOk && songKeysOk;
     tx.exec(allOk ? "COMMIT" : "ROLLBACK");
     if (!allOk) {
         return QJsonObject{{"ok", false}, {"error", "Could not update username"}};
