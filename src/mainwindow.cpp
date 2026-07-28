@@ -830,6 +830,16 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(&m_embeddedApi, &OpenKJEmbeddedApi::songSubmitted, this, &MainWindow::startAutoPlayIfIdle);
     connect(&m_embeddedApi, &OpenKJEmbeddedApi::pitchChangeRequested, this, &MainWindow::applyApiPitchChange);
+    // Queued so the stop - which fades, and pumps the event loop while it does - runs
+    // after the HTTP response has gone back out, rather than re-entering the socket
+    // handler that is still on the stack.
+    connect(&m_embeddedApi, &OpenKJEmbeddedApi::songSkipRequested, this, &MainWindow::skipCurrentSongViaApi,
+            Qt::QueuedConnection);
+    connect(&m_mediaBackendKar, &MediaBackend::stateChanged, &m_embeddedApi,
+            [this](const MediaBackend::State state) {
+                m_embeddedApi.setKaraokePlaying(state == MediaBackend::PlayingState ||
+                                                state == MediaBackend::PausedState);
+            });
     connect(&m_mediaBackendKar, &MediaBackend::pitchChanged, &m_embeddedApi, &OpenKJEmbeddedApi::setLivePitch);
     connect(&m_mediaBackendKar, &MediaBackend::pitchChanged, this, &MainWindow::karaokeMediaBackend_pitchChanged);
 
@@ -2172,6 +2182,30 @@ void MainWindow::applyApiPitchChange(const int semitones) {
     // Driven through the spinbox rather than straight to setPitchShift so the KJ's
     // display follows a key the singer changed from their phone.
     ui->spinBoxKey->setValue(std::clamp(semitones, -12, 12));
+}
+
+// A singer ending their own song from their phone. Pointedly not buttonStopClicked():
+// that one is the KJ pulling the plug and sets m_kAASkip so the show stops dead here.
+// Bailing out of your own song should look to everyone else exactly like the track
+// running out, so leave autoplay alone and let the rotation move on.
+void MainWindow::skipCurrentSongViaApi() {
+    if (m_mediaBackendKar.state() != MediaBackend::PlayingState &&
+        m_mediaBackendKar.state() != MediaBackend::PausedState) {
+        // The song ended between the tap and this call. Nothing to skip, and stopping
+        // now would cut off whoever the KJ has just started.
+        return;
+    }
+    m_logger->info("{} Current singer skipped the rest of their song from the remote", m_loggingPrefix);
+    m_kAASkip = false;
+    cdgWindow->showAlert(false);
+    audioRecorder.stop();
+    if (m_settings.bmKCrossFade()) {
+        m_mediaBackendBm.fadeIn(false);
+        m_mediaBackendKar.stop();
+    } else {
+        m_mediaBackendKar.stop();
+        m_mediaBackendBm.fadeIn();
+    }
 }
 
 void MainWindow::karaokeMediaBackend_pitchChanged(const int semitones) {

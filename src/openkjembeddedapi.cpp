@@ -868,6 +868,9 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             // have moved the key without writing to the database. The client needs
             // this to display where the key actually sits.
             nowPlaying.insert("key_change", m_livePitch);
+            // False in the gap between songs, when this row is really the song that
+            // just finished. Clients gate the self-skip control on it.
+            nowPlaying.insert("is_playing", m_karaokePlaying);
             nowPlaying.insert("request_time", QDateTime::currentSecsSinceEpoch());
         }
     }
@@ -1173,6 +1176,9 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiPost(const QString &path, const QJso
     if (path == "/local/request/key") {
         return jsonResponse(200, setOwnSongKey(payload));
     }
+    if (path == "/local/request/skip") {
+        return jsonResponse(200, skipOwnSong(payload));
+    }
     if (path == "/local/auth/login") {
         return jsonResponse(200, loginAdmin(payload));
     }
@@ -1461,6 +1467,10 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"supportsUserHistory", true},
         {"supportsAwayToggle", true},
         {"supportsReorderOwnQueue", true},
+        // The singer at the mic can end their own song early via
+        // POST /local/request/skip. Only offer the control while
+        // now_playing.is_playing is true and now_playing is theirs.
+        {"supportsSelfSkip", true},
         {"supportsEventStream", true},
         {"eventStreamPath", "/local/events"},
         {"supportsUpNextEvents", true},
@@ -1649,6 +1659,40 @@ int OpenKJEmbeddedApi::nowPlayingQueueSongId(QString *singerName, int *songId) c
     return query.value(0).toInt();
 }
 
+int OpenKJEmbeddedApi::callerNowPlayingQueueSongId(const QString &normalizedUsername,
+                                                   int *songId,
+                                                   QString *error) const
+{
+    // Between songs the rotation has not moved on yet, so the ownership check below
+    // would still name the last singer as the one at the mic. Without this guard a
+    // request landing in that gap would act on the track the KJ has just started for
+    // somebody else.
+    if (!m_karaokePlaying) {
+        *error = "Nothing is playing";
+        return -1;
+    }
+
+    QString singerName;
+    const int qsongId = nowPlayingQueueSongId(&singerName, songId);
+    if (qsongId <= 0) {
+        *error = "Nothing is playing";
+        return -1;
+    }
+
+    // The now-playing row has played = 1, so userOwnsRequest() cannot vet it. Same
+    // two-step check it makes: ownership record first, singer name as the fallback
+    // for songs the KJ queued on this singer's behalf.
+    const QString owner = requestOwner(qsongId);
+    const bool isOwner = owner.isEmpty() ? normalizeUsername(singerName) == normalizedUsername
+                                         : owner == normalizedUsername;
+    if (!isOwner) {
+        *error = "You are not the one singing right now";
+        return -1;
+    }
+
+    return qsongId;
+}
+
 void OpenKJEmbeddedApi::rememberUserSongKey(const QString &normalizedUsername, const int songId, const int keyChange)
 {
     if (songId <= 0) {
@@ -1691,21 +1735,11 @@ QJsonObject OpenKJEmbeddedApi::setOwnSongKey(const QJsonObject &payload)
         return QJsonObject{{"ok", false}, {"error", "direction must be 'up' or 'down'"}};
     }
 
-    QString singerName;
+    QString error;
     int songId = 0;
-    const int qsongId = nowPlayingQueueSongId(&singerName, &songId);
+    const int qsongId = callerNowPlayingQueueSongId(normalized, &songId, &error);
     if (qsongId <= 0) {
-        return QJsonObject{{"ok", false}, {"error", "Nothing is playing"}};
-    }
-
-    // The now-playing row has played = 1, so userOwnsRequest() cannot vet it. Same
-    // two-step check it makes: ownership record first, singer name as the fallback
-    // for songs the KJ queued on this singer's behalf.
-    const QString owner = requestOwner(qsongId);
-    const bool isOwner = owner.isEmpty() ? normalizeUsername(singerName) == normalized
-                                         : owner == normalized;
-    if (!isOwner) {
-        return QJsonObject{{"ok", false}, {"error", "You are not the one singing right now"}};
+        return QJsonObject{{"ok", false}, {"error", error}};
     }
 
     const int current = m_livePitch;
@@ -1721,6 +1755,38 @@ QJsonObject OpenKJEmbeddedApi::setOwnSongKey(const QJsonObject &payload)
     emit pitchChangeRequested(updated);
     nextSerial();
     return QJsonObject{{"ok", true}, {"key_change", updated}, {"at_limit", false}};
+}
+
+QJsonObject OpenKJEmbeddedApi::skipOwnSong(const QJsonObject &payload)
+{
+    QString normalized;
+    if (!isValidUserSession(payload.value("token").toString().trimmed(), &normalized)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    QString error;
+    if (callerNowPlayingQueueSongId(normalized, nullptr, &error) <= 0) {
+        return QJsonObject{{"ok", false}, {"error", error}};
+    }
+
+    // The queue entry is already played = 1 and the history row was written when the
+    // song started, so there is nothing to record here - a song bailed out of halfway
+    // still counts as their turn. All that is left is stopping the pipeline.
+    emit songSkipRequested();
+    nextSerial();
+    return QJsonObject{{"ok", true}};
+}
+
+void OpenKJEmbeddedApi::setKaraokePlaying(const bool playing)
+{
+    if (m_karaokePlaying == playing) {
+        return;
+    }
+    m_karaokePlaying = playing;
+    // now_playing.is_playing is what gates the skip button on the phone, and a song
+    // starting or ending does not necessarily touch the rotation - push the change
+    // rather than let it wait out the 20 s refresh.
+    scheduleSseBroadcast();
 }
 
 QJsonObject OpenKJEmbeddedApi::listUserFavorites(const QUrlQuery &query)

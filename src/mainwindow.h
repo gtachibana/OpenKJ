@@ -211,6 +211,7 @@ private slots:
     void clearSingerQueue();
     void spinBoxKeyValueChanged(const int &arg1);
     void applyApiPitchChange(int semitones);
+    void skipCurrentSongViaApi();
     void karaokeMediaBackend_pitchChanged(int semitones);
     void karaokeMediaBackend_positionChanged(const qint64 &position);
     void karaokeMediaBackend_durationChanged(const qint64 &duration);
