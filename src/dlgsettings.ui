@@ -345,6 +345,16 @@
                  </widget>
                 </item>
                 <item>
+                 <widget class="QCheckBox" name="checkBoxPitchCue">
+                  <property name="toolTip">
+                   <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Briefly shows the new key on the singer screen whenever the key is changed during a song, then fades out.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+                  </property>
+                  <property name="text">
+                   <string>Show key changes on the singer screen</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
                  <widget class="QCheckBox" name="checkBoxEnforceAspectRatio">
                   <property name="toolTip">
                    <string>If enabled, videos will respect the source aspect ratio when being stretched to fit the window.</string>

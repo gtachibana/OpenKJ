@@ -773,6 +773,10 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             nowPlaying.insert("artist", nowQuery.value(3).toString());
             nowPlaying.insert("title", nowQuery.value(4).toString());
             nowPlaying.insert("duration_seconds", std::max(1, nowQuery.value(5).toInt() / 1000));
+            // The live pipeline value, not queuesongs.keychg - the KJ's spinbox can
+            // have moved the key without writing to the database. The client needs
+            // this to display where the key actually sits.
+            nowPlaying.insert("key_change", m_livePitch);
             nowPlaying.insert("request_time", QDateTime::currentSecsSinceEpoch());
         }
     }
@@ -1074,6 +1078,9 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiPost(const QString &path, const QJso
     }
     if (path == "/local/user/away") {
         return jsonResponse(200, setOwnAway(payload));
+    }
+    if (path == "/local/request/key") {
+        return jsonResponse(200, setOwnSongKey(payload));
     }
     if (path == "/local/auth/login") {
         return jsonResponse(200, loginAdmin(payload));
@@ -1465,6 +1472,112 @@ QJsonObject OpenKJEmbeddedApi::setOwnAway(const QJsonObject &payload)
     return QJsonObject{{"ok", true}, {"away", away}};
 }
 
+void OpenKJEmbeddedApi::setLivePitch(const int semitones)
+{
+    m_livePitch = std::clamp(semitones, -12, 12);
+}
+
+int OpenKJEmbeddedApi::nowPlayingQueueSongId(QString *singerName, int *songId) const
+{
+    const int singerId = currentSingerId();
+    if (singerId < 0) {
+        return -1;
+    }
+
+    QSqlQuery query;
+    query.prepare(
+        "SELECT qs.qsongid, rs.name, qs.song "
+        "FROM queuesongs qs "
+        "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
+        "WHERE qs.singer = :singerId AND qs.played = 1 "
+        "ORDER BY qs.position DESC LIMIT 1");
+    query.bindValue(":singerId", singerId);
+    if (!query.exec() || !query.next()) {
+        return -1;
+    }
+    if (singerName) {
+        *singerName = query.value(1).toString();
+    }
+    if (songId) {
+        *songId = query.value(2).toInt();
+    }
+    return query.value(0).toInt();
+}
+
+void OpenKJEmbeddedApi::rememberUserSongKey(const QString &normalizedUsername, const int songId, const int keyChange)
+{
+    if (songId <= 0) {
+        return;
+    }
+    QSqlQuery query;
+    query.prepare("INSERT INTO local_user_song_keys (username_normalized, song_id, key_change, updated_at) "
+                  "VALUES (:username, :song_id, :key_change, :updated_at) "
+                  "ON CONFLICT(username_normalized, song_id) DO UPDATE SET "
+                  "key_change = excluded.key_change, updated_at = excluded.updated_at");
+    query.bindValue(":username", normalizedUsername);
+    query.bindValue(":song_id", songId);
+    query.bindValue(":key_change", std::clamp(keyChange, -12, 12));
+    query.bindValue(":updated_at", QDateTime::currentSecsSinceEpoch());
+    query.exec();
+}
+
+int OpenKJEmbeddedApi::preferredUserSongKey(const QString &normalizedUsername, const int songId) const
+{
+    QSqlQuery query;
+    query.prepare("SELECT key_change FROM local_user_song_keys "
+                  "WHERE username_normalized = :username AND song_id = :song_id");
+    query.bindValue(":username", normalizedUsername);
+    query.bindValue(":song_id", songId);
+    if (query.exec() && query.next()) {
+        return std::clamp(query.value(0).toInt(), -12, 12);
+    }
+    return 0;
+}
+
+QJsonObject OpenKJEmbeddedApi::setOwnSongKey(const QJsonObject &payload)
+{
+    QString normalized;
+    if (!isValidUserSession(payload.value("token").toString().trimmed(), &normalized)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    const QString direction = payload.value("direction").toString().trimmed().toLower();
+    if (direction != "up" && direction != "down") {
+        return QJsonObject{{"ok", false}, {"error", "direction must be 'up' or 'down'"}};
+    }
+
+    QString singerName;
+    int songId = 0;
+    const int qsongId = nowPlayingQueueSongId(&singerName, &songId);
+    if (qsongId <= 0) {
+        return QJsonObject{{"ok", false}, {"error", "Nothing is playing"}};
+    }
+
+    // The now-playing row has played = 1, so userOwnsRequest() cannot vet it. Same
+    // two-step check it makes: ownership record first, singer name as the fallback
+    // for songs the KJ queued on this singer's behalf.
+    const QString owner = requestOwner(qsongId);
+    const bool isOwner = owner.isEmpty() ? normalizeUsername(singerName) == normalized
+                                         : owner == normalized;
+    if (!isOwner) {
+        return QJsonObject{{"ok", false}, {"error", "You are not the one singing right now"}};
+    }
+
+    const int current = m_livePitch;
+    const int updated = std::clamp(current + (direction == "up" ? 1 : -1), -12, 12);
+    if (updated == current) {
+        // Already at the stop. Still a success - the key is where they asked for it.
+        return QJsonObject{{"ok", true}, {"key_change", updated}, {"at_limit", true}};
+    }
+
+    m_livePitch = updated;
+    setQueueSongKey(qsongId, updated);
+    rememberUserSongKey(normalized, songId, updated);
+    emit pitchChangeRequested(updated);
+    nextSerial();
+    return QJsonObject{{"ok", true}, {"key_change", updated}, {"at_limit", false}};
+}
+
 QJsonObject OpenKJEmbeddedApi::listUserFavorites(const QUrlQuery &query)
 {
     QString normalized;
@@ -1621,6 +1734,15 @@ bool OpenKJEmbeddedApi::ensureLocalModeSchema()
         "username_normalized TEXT NOT NULL,"
         "song_id INTEGER NOT NULL,"
         "created_at INTEGER NOT NULL,"
+        "PRIMARY KEY (username_normalized, song_id),"
+        "FOREIGN KEY(username_normalized) REFERENCES local_users(username_normalized) ON DELETE CASCADE)",
+        // The local-user counterpart of regularSongs.keychg: the key a singer last
+        // settled on for a song, replayed the next time they request it.
+        "CREATE TABLE IF NOT EXISTS local_user_song_keys ("
+        "username_normalized TEXT NOT NULL,"
+        "song_id INTEGER NOT NULL,"
+        "key_change INTEGER NOT NULL,"
+        "updated_at INTEGER NOT NULL,"
         "PRIMARY KEY (username_normalized, song_id),"
         "FOREIGN KEY(username_normalized) REFERENCES local_users(username_normalized) ON DELETE CASCADE)"
     };
@@ -2088,7 +2210,14 @@ QJsonObject OpenKJEmbeddedApi::requestSongFromLocalUser(const QJsonObject &paylo
         query.bindValue(":name", username);
         query.bindValue(":song", payload.value("songId").toInt());
         if (query.exec() && query.next()) {
-            recordRequestOwner(query.value(0).toInt(), normalized);
+            const int qsongId = query.value(0).toInt();
+            recordRequestOwner(qsongId, normalized);
+            // Replay the key this singer last settled on for this song, the way
+            // regularSongs.keychg does for the KJ's regulars.
+            const int preferredKey = preferredUserSongKey(normalized, payload.value("songId").toInt());
+            if (preferredKey != 0) {
+                setQueueSongKey(qsongId, preferredKey);
+            }
         }
         return QJsonObject{{"ok", true}};
     }

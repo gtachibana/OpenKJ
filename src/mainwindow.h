@@ -165,6 +165,8 @@ private:
     OKJSongbookAPI m_songbookApi;
     OpenKJEmbeddedApi m_embeddedApi{m_rotModel, m_qModel, m_settings, this};
     QWidget *m_historyTabWidget;
+    // Last key the CD+G cue displayed, so a repeated value doesn't re-flash it.
+    int m_lastCuedPitch{0};
     std::mt19937_64 rng;
 
     void updateIcons();
@@ -208,6 +210,8 @@ private slots:
     void clearRotation();
     void clearSingerQueue();
     void spinBoxKeyValueChanged(const int &arg1);
+    void applyApiPitchChange(int semitones);
+    void karaokeMediaBackend_pitchChanged(int semitones);
     void karaokeMediaBackend_positionChanged(const qint64 &position);
     void karaokeMediaBackend_durationChanged(const qint64 &duration);
     void karaokeMediaBackend_stateChanged(const MediaBackend::State &state);
