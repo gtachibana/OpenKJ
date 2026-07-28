@@ -234,6 +234,10 @@ void OpenKJEmbeddedApi::onSocketDisconnected()
     m_sseClients.remove(socket);
     if (m_sseClients.isEmpty()) {
         m_sseRefreshTimer.stop();
+        // Nothing drives evaluateUpNext() while no one is subscribed, so the set
+        // would otherwise thaw out stale and swallow the first alert after someone
+        // reconnects. "Already told" only means anything over a live connection.
+        m_upNextNotified.clear();
     }
     socket->deleteLater();
 }
@@ -282,6 +286,7 @@ void OpenKJEmbeddedApi::broadcastSseSnapshot()
 {
     if (m_sseClients.isEmpty()) {
         m_sseRefreshTimer.stop();
+        m_upNextNotified.clear();
         return;
     }
 
