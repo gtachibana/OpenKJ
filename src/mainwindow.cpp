@@ -2187,6 +2187,10 @@ void MainWindow::karaokeMediaBackend_pitchChanged(const int semitones) {
 
     const bool up = semitones > m_lastCuedPitch;
     m_lastCuedPitch = semitones;
+    // Past both guards this is a real adjustment into a song already in progress,
+    // whether the KJ made it here or the singer made it from their phone. Either
+    // way it is worth remembering for the next time they sing this song.
+    m_embeddedApi.commitLivePitch(semitones);
     cdgWindow->showPitchCue(semitones, up);
 }
 

@@ -31,6 +31,11 @@ public slots:
     // because queuesongs.keychg is not authoritative while a song plays - the KJ can
     // move the desktop spinbox, which retunes without touching the database.
     void setLivePitch(int semitones);
+    // Writes that key down against the singer, the way a nudge from their phone
+    // already does. Separate from setLivePitch() because only MainWindow can tell a
+    // deliberate mid-song adjustment from the setPitchShift() that fires on every
+    // song load, and the load-time one must not be saved.
+    void commitLivePitch(int semitones);
 
 signals:
     void songSubmitted();
