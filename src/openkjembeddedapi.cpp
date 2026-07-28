@@ -1477,6 +1477,55 @@ void OpenKJEmbeddedApi::setLivePitch(const int semitones)
     m_livePitch = std::clamp(semitones, -12, 12);
 }
 
+// A key the KJ dials in on the desktop spinbox is as much the singer's key as one
+// they set from their phone, but until now only the phone path wrote it down: the
+// spinbox retunes the pipeline without going near the database, so the adjustment
+// died with the song. MainWindow decides when to call this, because only it can
+// tell a deliberate mid-song change from the setPitchShift() that fires on every
+// song load - saving that one would overwrite a singer's stored key with whatever
+// the track happened to load at.
+void OpenKJEmbeddedApi::commitLivePitch(const int semitones)
+{
+    // Nothing here is meaningful outside a running Local Mode show, and the
+    // local_* tables are only guaranteed to exist once start() has run.
+    if (!m_server.isListening()) {
+        return;
+    }
+
+    const int key = std::clamp(semitones, -12, 12);
+    m_livePitch = key;
+
+    QString singerName;
+    int songId = -1;
+    const int qsongId = nowPlayingQueueSongId(&singerName, &songId);
+    if (qsongId < 0 || songId <= 0) {
+        return;
+    }
+
+    setQueueSongKey(qsongId, key);
+
+    // Whoever owns the request, falling back to the rotation name for songs the KJ
+    // queued on the singer's behalf - the same resolution the phone path uses.
+    const QString owner = requestOwner(qsongId);
+    const QString normalized = owner.isEmpty() ? normalizeUsername(singerName) : owner;
+
+    // Walk-ins the KJ typed straight into the rotation have no account to remember
+    // anything against, and inventing a row for them would collide with a real
+    // singer who later registers that name.
+    QSqlQuery isUser;
+    isUser.prepare("SELECT 1 FROM local_users WHERE username_normalized = :username");
+    isUser.bindValue(":username", normalized);
+    if (isUser.exec() && isUser.next()) {
+        rememberUserSongKey(normalized, songId, key);
+    }
+
+    nextSerial();
+    // now_playing.key_change reports the live pipeline value, and nothing else
+    // schedules a push when the pipeline retunes - without this the singer's phone
+    // lags by up to the 20 s refresh before it shows where the KJ just put them.
+    scheduleSseBroadcast();
+}
+
 int OpenKJEmbeddedApi::nowPlayingQueueSongId(QString *singerName, int *songId) const
 {
     const int singerId = currentSingerId();
