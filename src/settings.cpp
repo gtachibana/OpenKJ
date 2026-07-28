@@ -19,6 +19,7 @@
 */
 
 #include "settings.h"
+#include <algorithm>
 #include <QCoreApplication>
 #include <QApplication>
 #include <QStandardPaths>
@@ -1719,6 +1720,14 @@ QString Settings::embeddedApiBindAddress()
     return scopedValue("embeddedApiBindAddress", "0.0.0.0", false, LocalMode).toString();
 }
 
+int Settings::embeddedApiUpNextTurns()
+{
+    // Clamped rather than trusted: this bounds how far down the rotation the API
+    // will page people, and a stored value from a hand-edited registry key
+    // shouldn't be able to alert the whole room.
+    return std::clamp(scopedValue("embeddedApiUpNextTurns", 1, false, LocalMode).toInt(), 0, 5);
+}
+
 void Settings::setEmbeddedApiEnabled(bool enabled)
 {
     setScopedValue("embeddedApiEnabled", enabled, LocalMode);
@@ -1732,6 +1741,11 @@ void Settings::setEmbeddedApiPort(int port)
 void Settings::setEmbeddedApiBindAddress(const QString &address)
 {
     setScopedValue("embeddedApiBindAddress", address, LocalMode);
+}
+
+void Settings::setEmbeddedApiUpNextTurns(const int turns)
+{
+    setScopedValue("embeddedApiUpNextTurns", std::clamp(turns, 0, 5), LocalMode);
 }
 
 QString Settings::localUiUrl()
