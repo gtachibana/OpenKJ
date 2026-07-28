@@ -36,12 +36,21 @@ public slots:
     // deliberate mid-song adjustment from the setPitchShift() that fires on every
     // song load, and the load-time one must not be saved.
     void commitLivePitch(int semitones);
+    // Whether a karaoke track is actually on screen right now. The queuesongs row a
+    // singer is "currently" on stays played = 1 after the music ends, so the database
+    // alone cannot tell a song in progress from one that just finished - and the skip
+    // route has to know the difference before it stops anything.
+    void setKaraokePlaying(bool playing);
 
 signals:
     void songSubmitted();
     // Asks MainWindow to retune the running karaoke pipeline. The API has no handle
     // on the media backend, and only MainWindow can keep the KJ's spinbox in step.
     void pitchChangeRequested(int semitones);
+    // Asks MainWindow to end the running karaoke track early, on behalf of the singer
+    // performing it. Deliberately not the KJ's stop button: that one halts the show,
+    // this one lets the rotation advance as if the song had played out.
+    void songSkipRequested();
 
 private:
     struct HttpRequest
@@ -107,6 +116,9 @@ private:
 
     // Live pipeline key, fed by setLivePitch(). Authoritative while a song plays.
     int m_livePitch{0};
+    // Fed by setKaraokePlaying(). False in the gap between one singer's song ending
+    // and the next one starting, which the queuesongs rows cannot express.
+    bool m_karaokePlaying{false};
 
     void onNewConnection();
     void onSocketReadyRead();
@@ -193,9 +205,18 @@ private:
     // Relative rather than absolute so a stale client cannot yank the pitch away
     // from wherever the KJ has just put it.
     QJsonObject setOwnSongKey(const QJsonObject &payload);
+    // Ends the caller's own performance early. Only ever reachable by whoever is at
+    // the mic, so a singer can bail out of a song they picked badly without having to
+    // catch the KJ's eye.
+    QJsonObject skipOwnSong(const QJsonObject &payload);
     // qsongid of the entry currently being sung, or -1. Unlike the queue entries the
     // other user routes touch, this row has played = 1.
     int nowPlayingQueueSongId(QString *singerName = nullptr, int *songId = nullptr) const;
+    // The same entry, but only if the caller is the one singing it. -1 with *error set
+    // otherwise. Every route that acts on the performance in progress - rather than on
+    // a queued request - needs exactly this, so the between-songs guard and the
+    // ownership rules live here rather than in each handler. songId may be null.
+    int callerNowPlayingQueueSongId(const QString &normalizedUsername, int *songId, QString *error) const;
     void rememberUserSongKey(const QString &normalizedUsername, int songId, int keyChange);
     int preferredUserSongKey(const QString &normalizedUsername, int songId) const;
     // True when the queue entry belongs to this user, either by ownership
