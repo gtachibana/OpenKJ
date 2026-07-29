@@ -32,6 +32,8 @@ namespace Ui {
 class DlgRegularSingers;
 }
 
+class OpenKJEmbeddedApi;
+
 class DlgRegularSingers : public QDialog
 {
     Q_OBJECT
@@ -42,12 +44,17 @@ private:
     TableModelHistorySingers m_historySingersModel{this};
     ItemDelegateHistorySingers m_historySingersDelegate{this};
     TableModelRotation *m_rotModel;
+    OpenKJEmbeddedApi *m_embeddedApi{nullptr};
     Settings m_settings;
 
 public:
     explicit DlgRegularSingers(TableModelRotation *rotationModel, QWidget *parent = 0);
     ~DlgRegularSingers();
     TableModelHistorySingers& historySingersModel() { return m_historySingersModel; }
+    // Set by MainWindow after construction - the API object is built after this dialog,
+    // so it can't come in through the constructor. Renaming a regular has to rename
+    // their Local Mode account too; see renameHistorySinger().
+    void setEmbeddedApi(OpenKJEmbeddedApi *api) { m_embeddedApi = api; }
 
 signals:
     void regularSingerDeleted(const int regularID);

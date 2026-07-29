@@ -177,6 +177,11 @@ private:
     void updateGainProgress(int analyzed, int total);
     void applyModernWidgetStyle();
     void refreshModeAwareLabels();
+    // Carries a singer's Local Mode account across a rename of their rotation entry.
+    // The two are linked by name alone, so renaming one without the other leaves the
+    // singer's phone looking up a name that no longer exists. Returns false when the
+    // rename should be abandoned - the KJ has already been told why.
+    bool renameLocalUserForSinger(const QString &currentName, const QString &newName);
     void setupShortcuts();
     void setupConnections();
     void loadSettings();
