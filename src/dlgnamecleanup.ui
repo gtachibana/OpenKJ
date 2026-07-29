@@ -156,6 +156,16 @@
    <item>
     <layout class="QHBoxLayout" name="horizontalLayoutButtons">
      <item>
+      <widget class="QCheckBox" name="cbxRenameFiles">
+       <property name="toolTip">
+        <string>Without this, corrections live only in the database and are lost if you ever clear and rebuild it. Only files whose new name provably reads back the same are renamed; the rest are corrected in the database anyway.</string>
+       </property>
+       <property name="text">
+        <string>Also rename the files on disk</string>
+       </property>
+      </widget>
+     </item>
+     <item>
       <spacer name="horizontalSpacerButtons">
        <property name="orientation">
         <enum>Qt::Horizontal</enum>

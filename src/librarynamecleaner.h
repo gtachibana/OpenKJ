@@ -1,6 +1,7 @@
 #ifndef LIBRARYNAMECLEANER_H
 #define LIBRARYNAMECLEANER_H
 
+#include <QMap>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -72,18 +73,64 @@ public:
         [[nodiscard]] int countOf(Confidence confidence) const;
     };
 
-    explicit LibraryNameCleaner(QObject *parent = nullptr);
+    // One song's files, renamed to match its corrected name. A loose CDG carries
+    // its audio companion along; zips and video files move on their own.
+    struct Rename {
+        int songId{0};
+        QString fromMain;     // the file holding the dbSongs row
+        QString toMain;
+        QString fromAudio;    // companion audio for a loose CDG, empty otherwise
+        QString toAudio;
+        QString newBaseName;  // dbSongs.filename, extension stripped
+        QString artist;       // the corrected values this filename encodes
+        QString title;
+        QString discId;
+    };
 
-    // Reads dbSongs and works out what to propose. Writes nothing.
-    [[nodiscard]] Plan plan();
+    struct RenamePlan {
+        std::vector<Rename> renames;
+        // One line per song left alone, saying why. These are corrected in the
+        // database anyway - only their files are untouched.
+        QStringList keptAsIs;
+        // The same thing counted by cause, so the question of whether any of it
+        // matters can be answered from numbers rather than by scrolling a list.
+        QMap<QString, int> keptAsIsByCause;
+
+        [[nodiscard]] bool isEmpty() const { return renames.empty(); }
+    };
+
+    // Works out which of the songs these proposals touch can have their files
+    // renamed to match. Reads the database and stats the disk; changes nothing.
+    //
+    // A rename is only planned when the new filename provably reads back as the
+    // corrected name. The parser is not the inverse of the namer - it folds
+    // underscores into spaces and splits on " - ", so a name carrying either can
+    // come back different or truncated - so every candidate is run through the
+    // real import parser and dropped unless it round-trips exactly.
+    [[nodiscard]] RenamePlan planRenames(const std::vector<Proposal> &proposals);
 
     // Applies the given proposals in a single transaction, rolling the lot back
     // if any statement fails. Returns the number of distinct songs rewritten -
     // a song whose artist and title are both corrected counts once. errors()
     // explains a zero.
-    int execute(const std::vector<Proposal> &proposals);
+    //
+    // Files listed in renames are renamed as the transaction runs. A song whose
+    // files will not move keeps its correction in the database regardless; that
+    // is a warning, not a failure.
+    int execute(const std::vector<Proposal> &proposals, const RenamePlan &renames);
+    int execute(const std::vector<Proposal> &proposals) { return execute(proposals, RenamePlan{}); }
 
+    explicit LibraryNameCleaner(QObject *parent = nullptr);
+
+    // Reads dbSongs and works out what to propose. Writes nothing.
+    [[nodiscard]] Plan plan();
+
+    // Fatal problems - the transaction was rolled back and nothing changed.
     [[nodiscard]] const QStringList &errors() const { return m_errors; }
+
+    // Songs whose files could not be renamed. The run still succeeded and their
+    // names are corrected in the database.
+    [[nodiscard]] const QStringList &warnings() const { return m_warnings; }
 
     // CSV of every applied change, written once the transaction commits so a run
     // can be traced or reversed by hand.
@@ -112,6 +159,7 @@ private:
     std::string m_loggingPrefix{"[LibraryNameCleaner]"};
     std::shared_ptr<spdlog::logger> m_logger;
     QStringList m_errors;
+    QStringList m_warnings;
     QString m_journalPath;
 
     // A distinct string in one of the two columns, with the number of songs
@@ -146,6 +194,19 @@ private:
     // The digits of a string in order, "Vol 2" -> "2". Two names whose digits
     // differ are a numbering difference, not a typo.
     static QString digitsOf(const QString &value);
+
+    // The filename a source directory's naming pattern calls for, extension
+    // excluded. Empty when the pattern cannot express these values - a pattern
+    // that encodes a song id, for a song that hasn't got one.
+    static QString buildBaseName(int pattern, const QString &artist, const QString &title, const QString &discId);
+
+    // Whether Windows will accept this as a filename at all. Reserved
+    // characters, trailing dots and spaces, and the old device names.
+    static bool isLegalBaseName(const QString &baseName);
+
+    // Repoints every table holding this song's path and rewrites the columns
+    // derived from its filename. Wrapped in a savepoint.
+    static bool repointSong(const Rename &rename, QString &error);
 };
 
 #endif // LIBRARYNAMECLEANER_H

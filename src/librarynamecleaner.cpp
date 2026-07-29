@@ -6,13 +6,20 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStandardPaths>
 #include <QTextStream>
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <set>
+
+#include "karaokefileinfo.h"
+#include "karaokefilepatternresolver.h"
+#include "okjutil.h"
+#include "src/models/tablemodelkaraokesourcedirs.h"
 
 namespace {
 
@@ -42,6 +49,19 @@ namespace {
     // How much the winner has to outweigh a variant before folding it in counts
     // as a safe bet rather than something to eyeball.
     constexpr int highConfidenceRatio = 5;
+
+    // Windows refuses these outright, and a path much past this length needs
+    // long-path support that cannot be assumed.
+    const QString reservedChars{R"(<>:"/\|?*)"};
+    constexpr int maxPathLength = 255;
+
+    // Old DOS device names. Still special-cased by the filesystem, whatever the
+    // extension.
+    const std::array<QString, 22> reservedNames{
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
 
     QString csvEscape(const QString &field) {
         QString escaped = field;
@@ -405,8 +425,251 @@ LibraryNameCleaner::Plan LibraryNameCleaner::plan() {
     return plan;
 }
 
-int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals) {
+QString LibraryNameCleaner::buildBaseName(int pattern, const QString &artist, const QString &title,
+                                          const QString &discId) {
+    // Same shapes the single-song editor writes (MainWindow::editSong), so a
+    // song corrected here is named the way one corrected by hand would be.
+    switch (pattern) {
+        case SourceDir::SAT:
+            return discId.isEmpty() ? QString() : discId + " - " + artist + " - " + title;
+        case SourceDir::STA:
+            return discId.isEmpty() ? QString() : discId + " - " + title + " - " + artist;
+        case SourceDir::ATS:
+            return discId.isEmpty() ? QString() : artist + " - " + title + " - " + discId;
+        case SourceDir::TAS:
+            return discId.isEmpty() ? QString() : title + " - " + artist + " - " + discId;
+        case SourceDir::S_T_A:
+            return discId.isEmpty() ? QString() : discId + "_" + title + "_" + artist;
+        case SourceDir::AT:
+            return artist + " - " + title;
+        case SourceDir::TA:
+            return title + " - " + artist;
+        default:
+            // CUSTOM matches an arbitrary regex and METADATA reads the tags, so
+            // neither can be expressed as a filename.
+            return {};
+    }
+}
+
+bool LibraryNameCleaner::isLegalBaseName(const QString &baseName) {
+    if (baseName.isEmpty())
+        return false;
+    for (const QChar ch : baseName) {
+        if (ch.unicode() < 32 || reservedChars.contains(ch))
+            return false;
+    }
+    if (baseName.endsWith('.') || baseName.endsWith(' ') || baseName.startsWith(' '))
+        return false;
+    const QString upper = baseName.toUpper();
+    return std::none_of(reservedNames.begin(), reservedNames.end(),
+                        [&upper](const QString &reserved) { return upper == reserved; });
+}
+
+LibraryNameCleaner::RenamePlan LibraryNameCleaner::planRenames(const std::vector<Proposal> &proposals) {
     m_errors.clear();
+    RenamePlan plan;
+    if (proposals.empty())
+        return plan;
+
+    emit stateChanged(tr("Working out which files can be renamed..."));
+    QApplication::processEvents();
+
+    // Indexed the same way execute() applies them, so the values worked out here
+    // are the values the rows will actually end up holding.
+    QHash<QString, QString> artistVariants;
+    QHash<QString, QString> artistMisspellings;
+    QHash<QString, QHash<QString, QString>> titlesByArtist;
+    QSet<QString> interestingArtists;
+    for (const auto &proposal : proposals) {
+        if (proposal.field == Field::Title) {
+            titlesByArtist[proposal.scopeArtist][proposal.oldValue] = proposal.newValue;
+            interestingArtists.insert(proposal.scopeArtist);
+        } else if (proposal.reason == Reason::Misspelling) {
+            artistMisspellings[proposal.oldValue] = proposal.newValue;
+            interestingArtists.insert(proposal.oldValue);
+        } else {
+            artistVariants[proposal.oldValue] = proposal.newValue;
+            interestingArtists.insert(proposal.oldValue);
+        }
+    }
+
+    QSqlQuery query;
+    if (!query.exec("SELECT songid, path, artist, title, discid FROM dbSongs")) {
+        m_errors.append(tr("Could not read the library: %1").arg(query.lastError().text()));
+        return plan;
+    }
+
+    auto resolver = std::make_shared<KaraokeFilePatternResolver>();
+    // Two songs can be corrected to the same name; the second one to ask for a
+    // filename has to be turned away.
+    QSet<QString> claimedPaths;
+
+    while (query.next()) {
+        const QString artist = query.value(2).toString();
+        if (!interestingArtists.contains(artist))
+            continue;
+
+        const int songId = query.value(0).toInt();
+        const QString path = query.value(1).toString();
+        const QString title = query.value(3).toString();
+        const QString discId = query.value(4).toString();
+
+        QString finalTitle = title;
+        if (const auto it = titlesByArtist.constFind(artist); it != titlesByArtist.constEnd())
+            finalTitle = it->value(title, title);
+        QString finalArtist = artistVariants.value(artist, artist);
+        finalArtist = artistMisspellings.value(finalArtist, finalArtist);
+
+        if (finalArtist == artist && finalTitle == title)
+            continue;
+
+        const auto &pattern = resolver->getPattern(path);
+        if (pattern.pattern == SourceDir::CUSTOM || pattern.pattern == SourceDir::METADATA) {
+            plan.keptAsIs.append(tr("%1 - this folder takes its names from tags or a custom pattern, "
+                                    "not from the filename").arg(QFileInfo(path).fileName()));
+            plan.keptAsIsByCause[tr("folder names songs from tags or a custom pattern")]++;
+            continue;
+        }
+
+        const QString newBaseName = buildBaseName(pattern.pattern, finalArtist, finalTitle, discId);
+        if (newBaseName.isEmpty()) {
+            plan.keptAsIs.append(tr("%1 - this folder's naming pattern needs a song id and this song "
+                                    "hasn't got one").arg(QFileInfo(path).fileName()));
+            plan.keptAsIsByCause[tr("song has no song id, but the folder's pattern needs one")]++;
+            continue;
+        }
+        if (!isLegalBaseName(newBaseName)) {
+            plan.keptAsIs.append(tr("%1 - \"%2\" cannot be used as a filename")
+                                         .arg(QFileInfo(path).fileName(), newBaseName));
+            plan.keptAsIsByCause[tr("name holds characters a filename cannot")]++;
+            continue;
+        }
+
+        const QFileInfo info(path);
+        // QDir keeps Qt's '/' separator. dbSongs.path is populated from
+        // QDirIterator, which always uses '/', and a path with native '\'
+        // separators would compare unequal in DbUpdater's scan - making the song
+        // look both missing and new on every later update.
+        const QString newMain = QDir(info.absolutePath()).absoluteFilePath(newBaseName + "." + info.suffix());
+        if (newMain == path)
+            continue;
+        if (newMain.length() > maxPathLength) {
+            plan.keptAsIs.append(tr("%1 - the corrected filename would be too long").arg(info.fileName()));
+            plan.keptAsIsByCause[tr("corrected filename would be too long")]++;
+            continue;
+        }
+
+        // The parser is not the inverse of the namer: it folds underscores into
+        // spaces and splits on " - ", handing the leftovers to a single field.
+        // So rather than reason about which names survive that, the candidate is
+        // put through the very parser the importer uses and dropped unless it
+        // comes back identical. Nothing is stat'd here - for these patterns the
+        // parse is pure string work on the basename.
+        KaraokeFileInfo probe(nullptr, resolver);
+        probe.setFile(newMain);
+        if (probe.getArtist() != finalArtist || probe.getTitle() != finalTitle) {
+            plan.keptAsIs.append(tr("%1 - renaming it would not survive a reimport, the filename reads "
+                                    "back as \"%2 - %3\"")
+                                         .arg(info.fileName(), probe.getArtist(), probe.getTitle()));
+            plan.keptAsIsByCause[tr("filename would not read back as the corrected name")]++;
+            continue;
+        }
+
+        if (QFile::exists(newMain) || claimedPaths.contains(newMain)) {
+            plan.keptAsIs.append(tr("%1 - a file called \"%2\" is already there")
+                                         .arg(info.fileName(), newBaseName + "." + info.suffix()));
+            plan.keptAsIsByCause[tr("a file of that name is already there")]++;
+            continue;
+        }
+
+        Rename rename;
+        rename.songId = songId;
+        rename.fromMain = path;
+        rename.toMain = newMain;
+        rename.newBaseName = newBaseName;
+        rename.artist = finalArtist;
+        rename.title = finalTitle;
+        rename.discId = discId;
+
+        // A loose CDG is half a song; its audio has to travel with it.
+        if (info.suffix().compare("cdg", Qt::CaseInsensitive) == 0) {
+            rename.fromAudio = findMatchingAudioFile(path);
+            if (!rename.fromAudio.isEmpty()) {
+                rename.toAudio = QDir(info.absolutePath())
+                        .absoluteFilePath(newBaseName + "." + QFileInfo(rename.fromAudio).suffix());
+                if (QFile::exists(rename.toAudio) || claimedPaths.contains(rename.toAudio)) {
+                    plan.keptAsIs.append(tr("%1 - its audio file cannot be renamed, something of that "
+                                            "name is already there").arg(info.fileName()));
+                    plan.keptAsIsByCause[tr("a file of that name is already there")]++;
+                    continue;
+                }
+            }
+        }
+
+        claimedPaths.insert(rename.toMain);
+        if (!rename.toAudio.isEmpty())
+            claimedPaths.insert(rename.toAudio);
+        plan.renames.push_back(rename);
+    }
+
+    if (m_logger)
+        m_logger->info("{} {} songs can be renamed on disk, {} kept as is", m_loggingPrefix, plan.renames.size(),
+                       plan.keptAsIs.size());
+    return plan;
+}
+
+bool LibraryNameCleaner::repointSong(const Rename &rename, QString &error) {
+    QSqlQuery savepoint;
+    savepoint.exec("SAVEPOINT namefix_song");
+
+    // dbSongs is the anchor and also carries the columns derived from the
+    // filename, but queueSongs denormalizes the path at insert and both history
+    // tables key their own lookups on it. Miss any of them and the rows quietly
+    // orphan.
+    const QString searchString =
+            rename.newBaseName + " " + rename.artist + " " + rename.title + " " + rename.discId;
+
+    QSqlQuery songQuery;
+    songQuery.prepare("UPDATE dbSongs SET path = :new, filename = :filename, searchstring = :searchstring "
+                      "WHERE songid = :songid");
+    songQuery.bindValue(":new", rename.toMain);
+    // DbUpdater stores the basename without its extension; matching it keeps a
+    // corrected row identical to one a fresh import would produce.
+    songQuery.bindValue(":filename", rename.newBaseName);
+    songQuery.bindValue(":searchstring", searchString);
+    songQuery.bindValue(":songid", rename.songId);
+    if (!songQuery.exec()) {
+        error = songQuery.lastError().text();
+        savepoint.exec("ROLLBACK TO namefix_song");
+        savepoint.exec("RELEASE namefix_song");
+        return false;
+    }
+
+    static const std::array<QString, 3> statements{
+            QStringLiteral("UPDATE queuesongs SET path = :new WHERE path = :old"),
+            QStringLiteral("UPDATE dbSongHistory SET filepath = :new WHERE filepath = :old"),
+            QStringLiteral("UPDATE historySongs SET filepath = :new WHERE filepath = :old")
+    };
+    for (const auto &statement : statements) {
+        QSqlQuery query;
+        query.prepare(statement);
+        query.bindValue(":new", rename.toMain);
+        query.bindValue(":old", rename.fromMain);
+        if (!query.exec()) {
+            error = query.lastError().text();
+            savepoint.exec("ROLLBACK TO namefix_song");
+            savepoint.exec("RELEASE namefix_song");
+            return false;
+        }
+    }
+
+    savepoint.exec("RELEASE namefix_song");
+    return true;
+}
+
+int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals, const RenamePlan &renames) {
+    m_errors.clear();
+    m_warnings.clear();
     m_journalPath.clear();
     if (proposals.empty())
         return 0;
@@ -490,9 +753,53 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals) {
         }
     }
 
+    // Files come last, so a song whose files will not move still keeps the
+    // correction in the database. A failure here is a warning, not a rollback.
+    std::vector<Rename> renamed;
+    const auto undoRenames = [&renamed]() {
+        for (const auto &rename : renamed) {
+            QFile::rename(rename.toMain, rename.fromMain);
+            if (!rename.fromAudio.isEmpty())
+                QFile::rename(rename.toAudio, rename.fromAudio);
+        }
+    };
+
+    for (const auto &rename : renames.renames) {
+        if (!QFile::rename(rename.fromMain, rename.toMain)) {
+            m_warnings.append(tr("Could not rename %1, its name in OpenKJ was corrected anyway")
+                                      .arg(QFileInfo(rename.fromMain).fileName()));
+            continue;
+        }
+        if (!rename.fromAudio.isEmpty() && !QFile::rename(rename.fromAudio, rename.toAudio)) {
+            // Never leave a CDG separated from its audio - put it back.
+            QFile::rename(rename.toMain, rename.fromMain);
+            m_warnings.append(tr("Could not rename the audio for %1, left the song's files alone")
+                                      .arg(QFileInfo(rename.fromMain).fileName()));
+            continue;
+        }
+
+        QString repointError;
+        if (!repointSong(rename, repointError)) {
+            // Never leave the database pointing at a path that no longer exists.
+            QFile::rename(rename.toMain, rename.fromMain);
+            if (!rename.fromAudio.isEmpty())
+                QFile::rename(rename.toAudio, rename.fromAudio);
+            m_warnings.append(tr("Could not repoint %1 (%2), left the song's files alone")
+                                      .arg(QFileInfo(rename.fromMain).fileName(), repointError));
+            continue;
+        }
+
+        renamed.push_back(rename);
+        songsChanged.insert(rename.songId);
+    }
+
     if (!transaction.exec("COMMIT")) {
         m_errors.append(tr("Could not commit the changes: %1").arg(transaction.lastError().text()));
         transaction.exec("ROLLBACK");
+        // The rollback took the paths back to the old filenames, so the files
+        // have to follow or the library points at names that no longer exist.
+        undoRenames();
+        m_warnings.clear();
         return 0;
     }
 
@@ -502,13 +809,20 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals) {
     QFile journal(m_journalPath);
     if (journal.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream stream(&journal);
-        stream << "field,artist_scope,old_value,new_value,songs\n";
+        stream << "kind,field,artist_scope,old_value,new_value\n";
         for (const auto &proposal : ordered) {
-            stream << ((proposal.field == Field::Title) ? "title" : "artist") << ','
+            stream << "name," << ((proposal.field == Field::Title) ? "title" : "artist") << ','
                    << csvEscape(proposal.scopeArtist) << ','
                    << csvEscape(proposal.oldValue) << ','
-                   << csvEscape(proposal.newValue) << ','
-                   << proposal.songs << '\n';
+                   << csvEscape(proposal.newValue) << '\n';
+        }
+        // Renames go in the same journal so undoing a run by hand means walking
+        // one file, bottom to top.
+        for (const auto &rename : renamed) {
+            stream << "file,main,," << csvEscape(rename.fromMain) << ',' << csvEscape(rename.toMain) << '\n';
+            if (!rename.fromAudio.isEmpty())
+                stream << "file,audio,," << csvEscape(rename.fromAudio) << ',' << csvEscape(rename.toAudio)
+                       << '\n';
         }
     } else {
         m_journalPath.clear();
@@ -517,7 +831,7 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals) {
     }
 
     if (m_logger)
-        m_logger->info("{} Applied {} name changes across {} songs", m_loggingPrefix, ordered.size(),
-                       songsChanged.size());
+        m_logger->info("{} Applied {} name changes across {} songs, renamed {} songs' files", m_loggingPrefix,
+                       ordered.size(), songsChanged.size(), renamed.size());
     return (int) songsChanged.size();
 }

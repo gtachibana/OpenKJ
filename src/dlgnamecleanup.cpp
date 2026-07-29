@@ -212,15 +212,51 @@ void DlgNameCleanup::on_btnApply_clicked() {
     for (const auto &proposal : checked)
         songs += proposal.songs;
 
+    LibraryNameCleaner::RenamePlan renames;
+    if (ui->cbxRenameFiles->isChecked()) {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        renames = m_cleaner.planRenames(checked);
+        QApplication::restoreOverrideCursor();
+        if (!m_cleaner.errors().isEmpty()) {
+            QMessageBox::warning(this, tr("Could not check the files"), m_cleaner.errors().join("\n"));
+            return;
+        }
+    }
+
     QMessageBox confirm(this);
     confirm.setText(tr("Apply %1 name changes?").arg(checked.size()));
-    confirm.setInformativeText(tr("%1 song entries will be rewritten in the database.\n\n"
-                                  "Files on disk are not touched and nothing is deleted. Every change is "
-                                  "written to a CSV in the OpenKJ data folder so it can be traced or undone "
-                                  "by hand.\n\n"
-                                  "Note that clearing and rebuilding the database rebuilds these names from "
-                                  "the filenames again, discarding the corrections.")
-                                       .arg(songs));
+
+    QString detail = tr("%1 song entries will be rewritten in the database.\n\n").arg(songs);
+    if (!ui->cbxRenameFiles->isChecked()) {
+        detail += tr("Files on disk are not touched and nothing is deleted. Every change is written to a "
+                     "CSV in the OpenKJ data folder so it can be traced or undone by hand.\n\n"
+                     "Note that clearing and rebuilding the database rebuilds these names from the "
+                     "filenames again, discarding the corrections.");
+    } else {
+        detail += tr("%1 songs will also have their files renamed to match, so the fix survives a "
+                     "database rebuild. Nothing is deleted, and every rename is written to a CSV in the "
+                     "OpenKJ data folder.\n\n")
+                          .arg(renames.renames.size());
+        if (!renames.keptAsIs.isEmpty()) {
+            detail += tr("%1 songs keep the filenames they have - see the details. They are still "
+                         "corrected in OpenKJ; only a rebuild would lose them.\n\n")
+                              .arg(renames.keptAsIs.size());
+        }
+        detail += tr("Do this between shows - renaming a file that is queued up or playing is asking "
+                     "for trouble. Back up your library before the first run.");
+    }
+    confirm.setInformativeText(detail);
+
+    if (!renames.keptAsIs.isEmpty()) {
+        QStringList details;
+        // Counts first, so the question of whether any of this matters can be
+        // answered without reading a few hundred lines.
+        for (auto it = renames.keptAsIsByCause.constBegin(); it != renames.keptAsIsByCause.constEnd(); ++it)
+            details << QString("%1: %2").arg(QString::number(it.value()), it.key());
+        details << "" << tr("Song by song:") << renames.keptAsIs;
+        confirm.setDetailedText(details.join("\n"));
+    }
+
     confirm.setIcon(QMessageBox::Question);
     confirm.addButton(QMessageBox::Cancel);
     QPushButton *goButton = confirm.addButton(tr("Apply"), QMessageBox::AcceptRole);
@@ -229,7 +265,7 @@ void DlgNameCleanup::on_btnApply_clicked() {
         return;
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
-    const int changed = m_cleaner.execute(checked);
+    const int changed = m_cleaner.execute(checked, renames);
     QApplication::restoreOverrideCursor();
 
     if (!m_cleaner.errors().isEmpty()) {
@@ -241,10 +277,17 @@ void DlgNameCleanup::on_btnApply_clicked() {
 
     m_appliedChanges = true;
     QMessageBox done(this);
-    done.setIcon(QMessageBox::Information);
+    done.setIcon(m_cleaner.warnings().isEmpty() ? QMessageBox::Information : QMessageBox::Warning);
     done.setText(tr("Updated %1 songs.").arg(changed));
+    QString outcome;
+    if (!m_cleaner.warnings().isEmpty()) {
+        outcome = tr("%1 songs could not have their files renamed and were corrected in OpenKJ only.\n\n")
+                          .arg(m_cleaner.warnings().size());
+        done.setDetailedText(m_cleaner.warnings().join("\n"));
+    }
     if (!m_cleaner.journalPath().isEmpty())
-        done.setInformativeText(tr("A record of the changes was written to:\n%1").arg(m_cleaner.journalPath()));
+        outcome += tr("A record of the changes was written to:\n%1").arg(m_cleaner.journalPath());
+    done.setInformativeText(outcome);
     done.exec();
 
     // Re-run so anything the applied changes newly exposed shows up, and so the

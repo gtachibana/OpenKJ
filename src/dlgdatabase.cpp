@@ -359,8 +359,15 @@ void DlgDatabase::on_btnReorganize_clicked()
 
 void DlgDatabase::on_btnFixNames_clicked()
 {
+    // The dialog can rename files in the watched folders, and the watcher would
+    // answer each one with a rescan of a folder we are busy renaming inside.
+    setDirectoryMonitorEnabled(false);
+
     DlgNameCleanup dlg(this);
     dlg.exec();
+
+    setDirectoryMonitorEnabled(true);
+
     // The dialog rewrites dbSongs behind the model's back, so the in-memory
     // library has to be rebuilt before anything reads from it again.
     if (dlg.appliedChanges())
