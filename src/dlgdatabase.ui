@@ -181,6 +181,16 @@
            </widget>
           </item>
           <item>
+           <widget class="QPushButton" name="btnFixNames">
+            <property name="toolTip">
+             <string>Find and fix misspelled artist and title names in the database</string>
+            </property>
+            <property name="text">
+             <string>Fix Names...</string>
+            </property>
+           </widget>
+          </item>
+          <item>
            <spacer name="horizontalSpacer_5">
             <property name="orientation">
              <enum>Qt::Horizontal</enum>

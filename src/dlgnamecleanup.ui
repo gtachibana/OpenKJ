@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>DlgNameCleanup</class>
+ <widget class="QDialog" name="DlgNameCleanup">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1000</width>
+    <height>620</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Fix Artist &amp; Title Names</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QLabel" name="lblIntro">
+     <property name="text">
+      <string>Names that look like variants of each other, judged against the rest of your library. Ticked rows are the safe bets; review the rest before applying. Nothing changes until you press Apply.</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayoutFilter">
+     <item>
+      <widget class="QLabel" name="lblFilter">
+       <property name="text">
+        <string>Show:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="cbxFilter">
+       <item>
+        <property name="text">
+         <string>All changes</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Artists only</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Titles only</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>High confidence only</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <spacer name="horizontalSpacerFilter">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnCheckVisible">
+       <property name="toolTip">
+        <string>Tick every row currently shown</string>
+       </property>
+       <property name="text">
+        <string>Tick Shown</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnUncheckVisible">
+       <property name="toolTip">
+        <string>Untick every row currently shown</string>
+       </property>
+       <property name="text">
+        <string>Untick Shown</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QTableWidget" name="tableWidget">
+     <property name="alternatingRowColors">
+      <bool>true</bool>
+     </property>
+     <property name="selectionBehavior">
+      <enum>QAbstractItemView::SelectRows</enum>
+     </property>
+     <property name="editTriggers">
+      <set>QAbstractItemView::NoEditTriggers</set>
+     </property>
+     <property name="sortingEnabled">
+      <bool>true</bool>
+     </property>
+     <column>
+      <property name="text">
+       <string>Field</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Artist</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Current</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Proposed</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Songs</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Confidence</string>
+      </property>
+     </column>
+     <column>
+      <property name="text">
+       <string>Why</string>
+      </property>
+     </column>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="lblSummary">
+     <property name="text">
+      <string>Scanning...</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayoutButtons">
+     <item>
+      <spacer name="horizontalSpacerButtons">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnApply">
+       <property name="text">
+        <string>Apply Ticked Changes</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnClose">
+       <property name="text">
+        <string>Close</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

@@ -475,6 +475,8 @@ set(SOURCE_FILES
         src/karaokefilepatternresolver.cpp
         src/custompattern.cpp
         src/dlgeditsong.cpp
+        src/dlgnamecleanup.cpp
+        src/librarynamecleaner.cpp
         src/soundfxbutton.cpp
         src/runguard/runguard.cpp
         src/durationlazyupdater.cpp
@@ -540,6 +542,8 @@ set(SOURCE_FILES
         src/karaokefilepatternresolver.h
         src/custompattern.h
         src/dlgeditsong.h
+        src/dlgnamecleanup.h
+        src/librarynamecleaner.h
         src/soundfxbutton.h
         src/runguard/runguard.h
         src/models/tableviewtooltipfilter.h
@@ -568,6 +572,7 @@ set(SOURCE_FILES
         src/dlgpassword.ui
         src/dlgpurchaseprogress.ui
         src/dlgeditsong.ui
+        src/dlgnamecleanup.ui
         src/dlgvideopreview.ui
         src/resources.qrc
         src/softwarerendervideosink.cpp

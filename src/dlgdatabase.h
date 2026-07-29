@@ -76,6 +76,7 @@ private slots:
     static void showDbUpdateErrors(const QStringList& errors);
     void on_btnCustomPatterns_clicked();
     void on_btnReorganize_clicked();
+    void on_btnFixNames_clicked();
     void on_btnExport_clicked();
     void on_foldersSelectionChanged(const QItemSelection &selected, const QItemSelection &deselected);
 };

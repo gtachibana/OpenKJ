@@ -26,6 +26,7 @@
 #include <QSqlQuery>
 #include <QMessageBox>
 #include "dbupdater.h"
+#include "dlgnamecleanup.h"
 #include "libraryreorganizer.h"
 #include <QStandardPaths>
 
@@ -354,6 +355,16 @@ void DlgDatabase::on_btnReorganize_clicked()
                              tr("Moved %1 songs.\n\nA record of every move was written to:\n%2")
                                      .arg(plan.moves.size())
                                      .arg(reorganizer.journalPath()));
+}
+
+void DlgDatabase::on_btnFixNames_clicked()
+{
+    DlgNameCleanup dlg(this);
+    dlg.exec();
+    // The dialog rewrites dbSongs behind the model's back, so the in-memory
+    // library has to be rebuilt before anything reads from it again.
+    if (dlg.appliedChanges())
+        emit databaseUpdateComplete();
 }
 
 void DlgDatabase::on_btnExport_clicked()
