@@ -809,6 +809,7 @@ MainWindow::MainWindow(QWidget *parent) :
     });
     m_dlgRegularSingers.regularsChanged();
     m_dlgRegularSingers.setModal(false);
+    m_dlgRegularSingers.setEmbeddedApi(&m_embeddedApi);
     updateRotationDuration();
     if (m_settings.dbLazyLoadDurations())
         m_lazyDurationUpdater->getDurations();
@@ -2571,16 +2572,29 @@ void MainWindow::renameSinger() {
     bool ok;
     QString currentName = m_rotModel.getSinger(m_rtClickRotationSingerId).name;
     QString name = QInputDialog::getText(this, "Rename singer", "New name:", QLineEdit::Normal, currentName, &ok);
-    if (ok && !name.isEmpty()) {
-        if ((name.toLower() == currentName.toLower() && name != currentName) || !m_rotModel.singerExists(name)) {
-            m_rotModel.singerSetName(m_rtClickRotationSingerId, name);
-        } else if (m_rotModel.singerExists(name)) {
-            QMessageBox::warning(this, "Singer exists!", "A singer named " + name +
-                                                         " already exists. Please choose a unique name and try again. The operation has been cancelled.",
-                                 QMessageBox::Ok);
-        }
-
+    if (!ok || name.isEmpty() || name == currentName)
+        return;
+    // Changing only the case is still the same singer, so it can't collide with itself.
+    if (name.toLower() != currentName.toLower() && m_rotModel.singerExists(name)) {
+        QMessageBox::warning(this, "Singer exists!", "A singer named " + name +
+                                                     " already exists. Please choose a unique name and try again. The operation has been cancelled.",
+                             QMessageBox::Ok);
+        return;
     }
+    if (!renameLocalUserForSinger(currentName, name))
+        return;
+    m_rotModel.singerSetName(m_rtClickRotationSingerId, name);
+}
+
+bool MainWindow::renameLocalUserForSinger(const QString &currentName, const QString &newName) {
+    QString error;
+    if (m_embeddedApi.renameLocalUser(currentName, newName, &error))
+        return true;
+    QMessageBox::warning(this, "Unable to rename singer",
+                         error + " Renaming only the rotation would leave the singer's phone holding the old "
+                                 "name, which is how it finds them - so nothing has been changed.",
+                         QMessageBox::Ok);
+    return false;
 }
 
 void MainWindow::tableViewBmPlaylistContextMenu([[maybe_unused]]const QPoint &pos) {

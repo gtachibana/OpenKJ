@@ -26,6 +26,16 @@ public:
     bool start(quint16 port = 5050, const QHostAddress &address = QHostAddress::Any);
     void stop();
 
+    // A local user's rotation row is tied to their account by name and nothing else,
+    // so a rename on either side has to move the other or the singer's phone controls
+    // stop finding them. These let the desktop rename paths keep the account in step;
+    // the singer's own profile edit does the same thing from inside
+    // updateLocalUsername(). Renaming a singer who has no account succeeds without
+    // doing anything, so callers need not know whether this one is a local user.
+    // False means the rename must not go ahead, with the reason written to error.
+    [[nodiscard]] bool localUserExists(const QString &username) const;
+    bool renameLocalUser(const QString &currentUsername, const QString &nextUsername, QString *error = nullptr);
+
 public slots:
     // Keeps the API's idea of the current key in step with the pipeline. Needed
     // because queuesongs.keychg is not authoritative while a song plays - the KJ can
@@ -193,6 +203,11 @@ private:
     QJsonObject logoutLocalUser(const QJsonObject &payload);
     QJsonObject currentLocalUser(const QUrlQuery &query);
     QJsonObject updateLocalUsername(const QJsonObject &payload);
+    // Moves every row keyed on a username - sessions, request ownership, favorites,
+    // saved keys - plus the sung-song history, from one name to the other. Shared by
+    // the singer's own profile edit and by renameLocalUser(). Does not touch the
+    // rotation: the two callers differ on whether they still need to.
+    bool migrateLocalUserRows(const QString &currentNormalized, const QString &nextUsername);
     QJsonObject updateLocalPassword(const QJsonObject &payload);
     QJsonObject loginAdmin(const QJsonObject &payload);
     QJsonObject logoutAdmin(const QJsonObject &payload);

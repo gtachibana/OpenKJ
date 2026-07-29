@@ -20,6 +20,7 @@
 
 #include "dlgregularsingers.h"
 #include "ui_dlgregularsingers.h"
+#include "openkjembeddedapi.h"
 #include <QInputDialog>
 #include <QMenu>
 #include <QMessageBox>
@@ -119,9 +120,12 @@ void DlgRegularSingers::renameHistorySinger()
                     );
         return;
     }
+    // Changing only the case is still the same singer, so it doesn't conflict with itself.
+    const bool caseOnlyChange = (name.toLower() == currentName.toLower());
+    bool renameRotationSinger = false;
     if (m_rotModel->singerExists(currentName))
     {
-        if (!m_rotModel->singerExists(name))
+        if (caseOnlyChange || !m_rotModel->singerExists(name))
         {
             auto answer = QMessageBox::question(this,
                                                 "Rename matching rotation singer?",
@@ -132,7 +136,7 @@ void DlgRegularSingers::renameHistorySinger()
                                                 );
             if (answer == QMessageBox::No)
                 return;
-            m_rotModel->singerSetName(m_rotModel->getSingerByName(currentName).id, name);
+            renameRotationSinger = true;
         }
         else
         {
@@ -146,7 +150,32 @@ void DlgRegularSingers::renameHistorySinger()
                 return;
         }
     }
-    m_historySingersModel.rename(m_rtClickHistorySingerId, name);
+
+    // In Local Mode the singer's account lives under this same name, and that name is
+    // the only thing tying it to their rotation entry and their sung-song history. It
+    // has to move with the rename or their phone is left holding a name that matches
+    // nothing. Done before anything is written so a refusal changes nothing at all.
+    if (m_embeddedApi)
+    {
+        QString error;
+        if (!m_embeddedApi->renameLocalUser(currentName, name, &error))
+        {
+            QMessageBox::warning(this, tr("Unable to rename singer"),
+                                 error + tr(" The operation has been cancelled."), QMessageBox::Ok);
+            return;
+        }
+    }
+
+    if (renameRotationSinger)
+        m_rotModel->singerSetName(m_rotModel->getSingerByName(currentName).id, name);
+    if (!m_historySingersModel.rename(m_rtClickHistorySingerId, name))
+    {
+        // rename() refuses a name its cached list still holds - a change of case only,
+        // or a row the account sync above has already moved out from under it. The
+        // database is correct either way, so just re-read it rather than leaving a
+        // stale name on screen.
+        regularsChanged();
+    }
 }
 
 void DlgRegularSingers::on_lineEditSearch_textChanged(const QString &arg1)

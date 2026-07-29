@@ -2286,6 +2286,32 @@ QJsonObject OpenKJEmbeddedApi::updateLocalUsername(const QJsonObject &payload)
         return QJsonObject{{"ok", false}, {"error", "Username is already registered"}};
     }
 
+    // Everything this singer can do from their phone - away, self-skip, key nudges -
+    // finds their rotation row by username, so the row has to follow the rename. If
+    // somebody else is already sitting in the rotation under the new name it can't,
+    // and renaming anyway would leave them holding a name that matches nothing.
+    const bool inRotation = m_rotationModel.singerExists(currentUsername);
+    if (nextNormalized != currentNormalized && m_rotationModel.singerExists(nextUsername)) {
+        return QJsonObject{{"ok", false}, {"error", "A singer by that name is already in the rotation"}};
+    }
+
+    if (!migrateLocalUserRows(currentNormalized, nextUsername)) {
+        return QJsonObject{{"ok", false}, {"error", "Could not update username"}};
+    }
+
+    if (inRotation) {
+        const auto &singer = m_rotationModel.getSingerByName(currentUsername);
+        if (singer.id != -1)
+            m_rotationModel.singerSetName(singer.id, nextUsername);
+    }
+
+    return QJsonObject{{"ok", true}, {"username", nextUsername}};
+}
+
+bool OpenKJEmbeddedApi::migrateLocalUserRows(const QString &currentNormalized, const QString &nextUsername)
+{
+    const QString nextNormalized = normalizeUsername(nextUsername);
+
     QSqlQuery tx;
     tx.exec("BEGIN TRANSACTION");
     QSqlQuery updateUser;
@@ -2349,11 +2375,49 @@ QJsonObject OpenKJEmbeddedApi::updateLocalUsername(const QJsonObject &payload)
 
     const bool allOk = userOk && sessionsOk && requestsOk && favoritesOk && songKeysOk;
     tx.exec(allOk ? "COMMIT" : "ROLLBACK");
-    if (!allOk) {
-        return QJsonObject{{"ok", false}, {"error", "Could not update username"}};
+    return allOk;
+}
+
+bool OpenKJEmbeddedApi::localUserExists(const QString &username) const
+{
+    QSqlQuery query;
+    query.prepare("SELECT 1 FROM local_users WHERE username_normalized = :username");
+    query.bindValue(":username", normalizeUsername(username));
+    // A failed exec means the Local Mode tables were never created on this install,
+    // which is just a longer way of saying there is no such account.
+    return query.exec() && query.next();
+}
+
+bool OpenKJEmbeddedApi::renameLocalUser(const QString &currentUsername, const QString &nextUsername, QString *error)
+{
+    const QString currentNormalized = normalizeUsername(currentUsername);
+    const QString nextNormalized = normalizeUsername(nextUsername);
+
+    if (!localUserExists(currentUsername))
+        return true;
+
+    if (nextNormalized != currentNormalized && localUserExists(nextUsername)) {
+        if (error)
+            *error = QString("A singer account named %1 is already registered.").arg(nextUsername);
+        return false;
     }
 
-    return QJsonObject{{"ok", true}, {"username", nextUsername}};
+    // The account has to end up on the same name as the singer's rotation entry, so
+    // moving it onto a name somebody else already occupies in the rotation is exactly
+    // the split this is here to prevent.
+    if (nextNormalized != currentNormalized && m_rotationModel.singerExists(nextUsername)) {
+        if (error)
+            *error = QString("Another singer named %1 is already in the rotation.").arg(nextUsername);
+        return false;
+    }
+
+    if (!migrateLocalUserRows(currentNormalized, nextUsername)) {
+        if (error)
+            *error = "The singer's account could not be updated.";
+        return false;
+    }
+
+    return true;
 }
 
 QJsonObject OpenKJEmbeddedApi::updateLocalPassword(const QJsonObject &payload)
