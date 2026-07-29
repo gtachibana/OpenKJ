@@ -154,10 +154,11 @@ void DlgNameCleanup::updateSummary() {
         songs += proposal.songs;
 
     // The count is of everything ticked, filtered out or not, so a hidden row
-    // can never be applied unnoticed.
+    // can never be applied unnoticed. Song entries rather than songs, since one
+    // song can be counted by both an artist fix and a title fix.
     ui->lblSummary->setText(tr("%1 possible fixes across %2 songs by %3 artists "
                                "(%4 artist, %5 title, %6 high confidence). "
-                               "%7 ticked, affecting %8 songs.")
+                               "%7 ticked, covering %8 song entries.")
                                     .arg(m_plan.proposals.size())
                                     .arg(m_plan.scannedSongs)
                                     .arg(m_plan.distinctArtists)
@@ -213,7 +214,7 @@ void DlgNameCleanup::on_btnApply_clicked() {
 
     QMessageBox confirm(this);
     confirm.setText(tr("Apply %1 name changes?").arg(checked.size()));
-    confirm.setInformativeText(tr("%1 songs will be renamed in the database.\n\n"
+    confirm.setInformativeText(tr("%1 song entries will be rewritten in the database.\n\n"
                                   "Files on disk are not touched and nothing is deleted. Every change is "
                                   "written to a CSV in the OpenKJ data folder so it can be traced or undone "
                                   "by hand.\n\n"

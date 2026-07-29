@@ -446,7 +446,9 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals) {
         QString discId;
     };
 
-    int rowsChanged{0};
+    // A song can be touched twice - once for its title, once for its artist -
+    // so the songs are counted rather than the writes.
+    std::set<int> songsChanged;
     for (const auto &proposal : ordered) {
         QSqlQuery &select = (proposal.field == Field::Title) ? selectByTitle : selectByArtist;
         if (proposal.field == Field::Title)
@@ -484,7 +486,7 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals) {
                 transaction.exec("ROLLBACK");
                 return 0;
             }
-            rowsChanged++;
+            songsChanged.insert(row.songId);
         }
     }
 
@@ -515,7 +517,7 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals) {
     }
 
     if (m_logger)
-        m_logger->info("{} Applied {} name changes, {} song rows rewritten", m_loggingPrefix, ordered.size(),
-                       rowsChanged);
-    return rowsChanged;
+        m_logger->info("{} Applied {} name changes across {} songs", m_loggingPrefix, ordered.size(),
+                       songsChanged.size());
+    return (int) songsChanged.size();
 }

@@ -78,8 +78,9 @@ public:
     [[nodiscard]] Plan plan();
 
     // Applies the given proposals in a single transaction, rolling the lot back
-    // if any statement fails. Returns the number of song rows rewritten;
-    // errors() explains a zero.
+    // if any statement fails. Returns the number of distinct songs rewritten -
+    // a song whose artist and title are both corrected counts once. errors()
+    // explains a zero.
     int execute(const std::vector<Proposal> &proposals);
 
     [[nodiscard]] const QStringList &errors() const { return m_errors; }
