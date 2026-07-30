@@ -836,6 +836,10 @@ MainWindow::MainWindow(QWidget *parent) :
     // handler that is still on the stack.
     connect(&m_embeddedApi, &OpenKJEmbeddedApi::songSkipRequested, this, &MainWindow::skipCurrentSongViaApi,
             Qt::QueuedConnection);
+    connect(&m_embeddedApi, &OpenKJEmbeddedApi::cheerReceived, this,
+            [this](const QString &reaction, const int count, const int songTotal) {
+                cdgWindow->showCheers(reaction, count, songTotal);
+            });
     connect(&m_mediaBackendKar, &MediaBackend::stateChanged, &m_embeddedApi,
             [this](const MediaBackend::State state) {
                 m_embeddedApi.setKaraokePlaying(state == MediaBackend::PlayingState ||

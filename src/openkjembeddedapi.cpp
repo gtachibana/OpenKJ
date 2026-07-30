@@ -49,6 +49,27 @@ constexpr int kPbkdf2Iterations = 50000;
 constexpr int kPbkdf2KeyBytes = 32;
 constexpr int kSaltBytes = 16;
 
+// The reactions a client may send. Closed vocabulary rather than free text: the
+// value picks a glyph on the singer screen, and nothing arriving off the network
+// should be able to choose what gets drawn there. A list rather than a set so the
+// order is stable - clients are handed this to lay out their buttons.
+const QStringList &cheerReactions()
+{
+    static const QStringList reactions{"clap", "fire", "heart", "star", "party"};
+    return reactions;
+}
+
+// Cheer rate limit, per peer address. Six banked taps lets someone hammer the
+// button through a big moment; the refill then holds them near two per second,
+// which is about as fast as a person claps and far below what it takes to swamp
+// the screen. A phone that runs dry just gets its extra taps dropped.
+constexpr int kCheerBucketCapacityMilli = 6000;
+constexpr int kCheerRefillPerSecMilli = 2000;
+
+// Cheers arrive as a scatter of individual taps; this is how long they pool before
+// the screen and the event stream see them. Matches the SSE coalescing interval.
+constexpr int kCheerFlushMs = 250;
+
 } // namespace
 
 OpenKJEmbeddedApi::OpenKJEmbeddedApi(TableModelRotation &rotationModel,
@@ -78,6 +99,10 @@ OpenKJEmbeddedApi::OpenKJEmbeddedApi(TableModelRotation &rotationModel,
     connect(&m_queueModel, &TableModelQueueSongs::queueModified,
             this, [this](int) { scheduleSseBroadcast(); });
 
+    m_cheerFlushTimer.setSingleShot(true);
+    m_cheerFlushTimer.setInterval(kCheerFlushMs);
+    connect(&m_cheerFlushTimer, &QTimer::timeout, this, &OpenKJEmbeddedApi::flushCheers);
+
     m_idleSweepTimer.setInterval(kIdleSweepIntervalMs);
     connect(&m_idleSweepTimer, &QTimer::timeout, this, &OpenKJEmbeddedApi::sweepIdleConnections);
 }
@@ -104,9 +129,12 @@ void OpenKJEmbeddedApi::stop()
 
     m_sseBroadcastTimer.stop();
     m_sseRefreshTimer.stop();
+    m_cheerFlushTimer.stop();
     m_idleSweepTimer.stop();
     m_sseClients.clear();
     m_upNextNotified.clear();
+    m_cheerPending.clear();
+    m_cheerBuckets.clear();
 
     for (QTcpSocket *socket : m_connections.keys()) {
         socket->disconnectFromHost();
@@ -214,6 +242,14 @@ void OpenKJEmbeddedApi::sweepIdleConnections()
         const bool locked = now < it.value().lockedUntilMs;
         const bool windowLive = now - it.value().windowStartMs < kLoginFailureWindowMs;
         it = (locked || windowLive) ? std::next(it) : m_loginThrottle.erase(it);
+    }
+
+    // Same reasoning for the cheer buckets, which accumulate an entry per phone in
+    // the room. One that has sat long enough to have refilled completely is
+    // indistinguishable from a peer we have never seen, so it can go.
+    const qint64 fullRefillMs = (static_cast<qint64>(kCheerBucketCapacityMilli) * 1000) / kCheerRefillPerSecMilli;
+    for (auto it = m_cheerBuckets.begin(); it != m_cheerBuckets.end();) {
+        it = (now - it.value().lastRefillMs < fullRefillMs) ? std::next(it) : m_cheerBuckets.erase(it);
     }
 }
 
@@ -585,8 +621,13 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
         }
         // Most /local POSTs mutate the queue or rotation, and several of them do it
         // with raw SQL that never trips a model signal - push a snapshot regardless.
+        // Cheers are the exception: they touch nothing the snapshot reports, they
+        // arrive orders of magnitude more often than anything else here, and they
+        // already push their own much smaller frame from flushCheers().
         const QByteArray response = handleLocalApiPost(cleanPath, payload);
-        scheduleSseBroadcast();
+        if (cleanPath != "/local/cheer") {
+            scheduleSseBroadcast();
+        }
         return response;
     }
 
@@ -871,6 +912,9 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             // False in the gap between songs, when this row is really the song that
             // just finished. Clients gate the self-skip control on it.
             nowPlaying.insert("is_playing", m_karaokePlaying);
+            // Carried here as well as on the "cheer" event so a phone that connects
+            // mid-song shows the tally so far rather than starting from zero.
+            nowPlaying.insert("cheers", m_cheerSongTotal);
             nowPlaying.insert("request_time", QDateTime::currentSecsSinceEpoch());
         }
     }
@@ -1179,6 +1223,9 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiPost(const QString &path, const QJso
     if (path == "/local/request/skip") {
         return jsonResponse(200, skipOwnSong(payload));
     }
+    if (path == "/local/cheer") {
+        return jsonResponse(200, recordCheer(payload));
+    }
     if (path == "/local/auth/login") {
         return jsonResponse(200, loginAdmin(payload));
     }
@@ -1477,7 +1524,12 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"upNextEventName", "upnext"},
         // 0 when the KJ has turned the alerts off, so a client can hide the
         // notification opt-in rather than offer one that will never fire.
-        {"upNextTurns", m_settings.embeddedApiUpNextTurns()}
+        {"upNextTurns", m_settings.embeddedApiUpNextTurns()},
+        // Anyone in the room can POST /local/cheer - no account needed - and the
+        // running tally comes back on the "cheer" event and in now_playing.cheers.
+        {"supportsCheers", m_settings.cheersEnabled()},
+        {"cheerEventName", "cheer"},
+        {"cheerReactions", QJsonArray::fromStringList(cheerReactions())}
     };
 }
 
@@ -1777,12 +1829,96 @@ QJsonObject OpenKJEmbeddedApi::skipOwnSong(const QJsonObject &payload)
     return QJsonObject{{"ok", true}};
 }
 
+QJsonObject OpenKJEmbeddedApi::recordCheer(const QJsonObject &payload)
+{
+    if (!m_settings.cheersEnabled()) {
+        return QJsonObject{{"ok", false}, {"error", "Cheers are turned off"}};
+    }
+
+    const QString reaction = payload.value("reaction").toString().trimmed().toLower();
+    if (!cheerReactions().contains(reaction)) {
+        return QJsonObject{{"ok", false}, {"error", "Unknown reaction"}};
+    }
+
+    // ok:false rather than a silent success, but flagged so a client can tell this
+    // apart from a real rejection and swallow it - a dropped tap during an ovation
+    // is not something to put an error toast in front of anyone for.
+    if (cheerThrottled()) {
+        return QJsonObject{{"ok", false}, {"throttled", true}, {"error", "Too many cheers, slow down"}};
+    }
+
+    ++m_cheerPending[reaction];
+    ++m_cheerSongTotal;
+    if (!m_cheerFlushTimer.isActive()) {
+        m_cheerFlushTimer.start();
+    }
+
+    return QJsonObject{{"ok", true}, {"total", m_cheerSongTotal}};
+}
+
+bool OpenKJEmbeddedApi::cheerThrottled()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    CheerBucket &bucket = m_cheerBuckets[m_currentClientKey];
+    if (bucket.lastRefillMs == 0) {
+        bucket.tokensMilli = kCheerBucketCapacityMilli;
+    } else {
+        const qint64 elapsed = now - bucket.lastRefillMs;
+        bucket.tokensMilli = static_cast<int>(std::min<qint64>(
+            kCheerBucketCapacityMilli,
+            bucket.tokensMilli + (elapsed * kCheerRefillPerSecMilli) / 1000));
+    }
+    bucket.lastRefillMs = now;
+
+    if (bucket.tokensMilli < 1000) {
+        return true;
+    }
+    bucket.tokensMilli -= 1000;
+    return false;
+}
+
+void OpenKJEmbeddedApi::flushCheers()
+{
+    if (m_cheerPending.isEmpty()) {
+        return;
+    }
+
+    const QHash<QString, int> batch = m_cheerPending;
+    m_cheerPending.clear();
+
+    QJsonObject counts;
+    for (auto it = batch.cbegin(); it != batch.cend(); ++it) {
+        counts.insert(it.key(), it.value());
+        emit cheerReceived(it.key(), it.value(), m_cheerSongTotal);
+    }
+
+    // Phones get the tally too, so a singer can see the room reacting even with the
+    // screen behind them. Its own frame rather than a queue snapshot: nothing about
+    // the rotation changed, and this fires far more often than the rotation does.
+    if (m_sseClients.isEmpty()) {
+        return;
+    }
+    ++m_sseEventId;
+    const QByteArray data = QJsonDocument(QJsonObject{{"counts", counts}, {"total", m_cheerSongTotal}})
+                                .toJson(QJsonDocument::Compact);
+    const auto clients = m_sseClients;
+    for (QTcpSocket *socket : clients) {
+        writeSseFrame(socket, "cheer", data);
+    }
+}
+
 void OpenKJEmbeddedApi::setKaraokePlaying(const bool playing)
 {
     if (m_karaokePlaying == playing) {
         return;
     }
     m_karaokePlaying = playing;
+    if (playing) {
+        // A new performance starts on zero. Cheers that land in the gap after a song
+        // ends still bank against the one that just finished, which is where the
+        // applause was aimed.
+        m_cheerSongTotal = 0;
+    }
     // now_playing.is_playing is what gates the skip button on the phone, and a song
     // starting or ending does not necessarily touch the rotation - push the change
     // rather than let it wait out the 20 s refresh.

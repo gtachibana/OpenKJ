@@ -145,6 +145,11 @@ public:
     bool cdgRemainEnabled();
     bool cdgPitchCueEnabled();
     void setCdgPitchCueEnabled(bool enabled);
+    // Governs the whole cheers feature, not just the drawing: the embedded API
+    // reports it as a capability and rejects POST /local/cheer while it is off, so
+    // turning it off here takes the button off the phones too.
+    bool cheersEnabled();
+    void setCheersEnabled(bool enabled);
     QColor tickerBgColor();
     void setTickerBgColor(QColor color);
     bool tickerFullRotation();

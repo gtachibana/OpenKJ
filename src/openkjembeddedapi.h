@@ -61,6 +61,10 @@ signals:
     // performing it. Deliberately not the KJ's stop button: that one halts the show,
     // this one lets the rotation advance as if the song had played out.
     void songSkipRequested();
+    // A batch of reactions to float up the singer screen. count is how many arrived
+    // for this reaction since the last flush; songTotal is the running tally for the
+    // performance, which is what the on-screen counter shows.
+    void cheerReceived(const QString &reaction, int count, int songTotal);
 
 private:
     struct HttpRequest
@@ -97,6 +101,16 @@ private:
         qint64 lockedUntilMs{0};
     };
 
+    // Leaky bucket for one peer address, in thousandths of a cheer so the refill can
+    // be integer arithmetic. Lets a phone tap a short burst and then settle to a
+    // steady rate, instead of either dropping half a genuine ovation or letting one
+    // client hold down a button and own the screen.
+    struct CheerBucket
+    {
+        int tokensMilli{0};
+        qint64 lastRefillMs{0};
+    };
+
     QTcpServer m_server;
     QHash<QTcpSocket *, Connection> m_connections;
     TableModelRotation &m_rotationModel;
@@ -123,6 +137,15 @@ private:
     // Safe because handling is synchronous and single-threaded.
     QString m_currentClientKey;
     QHash<QString, LoginThrottle> m_loginThrottle;
+
+    // Reactions banked since the last flush, keyed by reaction name.
+    QHash<QString, int> m_cheerPending;
+    QTimer m_cheerFlushTimer;
+    QHash<QString, CheerBucket> m_cheerBuckets;
+    // Reactions for the performance in progress. Reset when a song starts rather than
+    // when one ends, so the applause that lands after the music stops still counts
+    // toward the song it was for.
+    int m_cheerSongTotal{0};
 
     // Live pipeline key, fed by setLivePitch(). Authoritative while a song plays.
     int m_livePitch{0};
@@ -224,6 +247,19 @@ private:
     // the mic, so a singer can bail out of a song they picked badly without having to
     // catch the KJ's eye.
     QJsonObject skipOwnSong(const QJsonObject &payload);
+    // Takes one reaction from the room. Deliberately open to anyone who can reach the
+    // server: the audience applauding is the entire point, and most of a bar has no
+    // account. A token is accepted but not required, and buys nothing except that the
+    // rate limit is charged the same either way.
+    QJsonObject recordCheer(const QJsonObject &payload);
+    // Hands the batch since the last flush to the singer screen and to the event
+    // stream. Batched because thirty phones tapping at once is the success case, and
+    // each tap must not become its own repaint and its own SSE frame.
+    void flushCheers();
+    // True when this peer has spent its bucket. Separate from the login throttle: that
+    // one locks an address out for minutes after a burst of failures, which is the
+    // wrong shape here - a cheering room should be smoothed, not punished.
+    bool cheerThrottled();
     // qsongid of the entry currently being sung, or -1. Unlike the queue entries the
     // other user routes touch, this row has played = 1.
     int nowPlayingQueueSongId(QString *singerName = nullptr, int *songId = nullptr) const;

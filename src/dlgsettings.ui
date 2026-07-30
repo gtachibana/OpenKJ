@@ -355,6 +355,16 @@
                  </widget>
                 </item>
                 <item>
+                 <widget class="QCheckBox" name="checkBoxCheers">
+                  <property name="toolTip">
+                   <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Lets anyone in the room send a reaction from their phone, which floats up the singer screen along with a running count for the song. Local Mode only. Turning this off also removes the button from the phones.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+                  </property>
+                  <property name="text">
+                   <string>Show cheers from the room on the singer screen</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
                  <widget class="QCheckBox" name="checkBoxEnforceAspectRatio">
                   <property name="toolTip">
                    <string>If enabled, videos will respect the source aspect ratio when being stretched to fit the window.</string>
