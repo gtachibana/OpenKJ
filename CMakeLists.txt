@@ -762,7 +762,14 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "Windows")
             $<$<NOT:$<COMPILE_LANGUAGE:RC>>:${WINDOWS_GSTREAMER_INCLUDE_DIRS}>
     )
     target_link_libraries(openkj PRIVATE ${LIBRARIES})
-    target_link_options(openkj PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
+    # --disable-auto-import turns a silent startup abort into a link error.
+    # Auto-imported symbols are patched by 32-bit pseudo-relocs before main()
+    # runs, and overflow if the owning DLL loads more than 2GB away -- killing
+    # the app with no window and no log. Refusing them at link time means any
+    # new occurrence names itself in the build output instead. If this ever
+    # fails to link, wrap the reported symbol in src/mingw_math_fix.cpp rather
+    # than dropping the flag.
+    target_link_options(openkj PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition -Wl,--disable-auto-import)
     set_property(
             TARGET openkj
             PROPERTY WIN32_EXECUTABLE true

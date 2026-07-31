@@ -211,6 +211,12 @@ jobs:
         for f in ./gstreamer-dist/1.0/mingw_${{ matrix.arch }}/bin/*.dll; do
           case "$(basename "$f")" in
             libgcc*|libstdc++*|libwinpthread*|libsrt*) echo "Skipping runtime: $f" ;;
+            # Support libraries for plugins excluded below. librsvg is not
+            # imported by anything we ship (verified against the import tables
+            # of the whole package); the other two are pulled in only by the
+            # video *encoders*, and OpenKJ never encodes video.
+            librsvg-2-2*|libx265*|libSvtAv1Enc*|librav1e*)
+              echo "Skipping unused support lib: $f" ;;
             *) cp -v "$f" output/ ;;
           esac
         done
@@ -222,6 +228,15 @@ jobs:
             libgstwebrtcdsp*|libgstsrt*|libgstwasapi2*|\
             libgstmfcodec*|libgstmcodec*)
               echo "Skipping incompatible plugin (requires newer libstdc++): $f" ;;
+            # gst-plugins-rs ships cloud/streaming plugins that dwarf the rest
+            # of the package -- rswebrtc alone is 382MB and aws is 230MB, out
+            # of 821MB of plugins. OpenKJ plays local files, so none of this is
+            # reachable. Video encoders go too; we only ever decode.
+            libgstrswebrtc*|libgstaws*|libgstwebrtchttp*|libgstquinn*|\
+            libgstreqwest*|libgstrsrtp*|libgstthreadshare*|\
+            libgstelevenlabs*|libgstrstracers*|\
+            libgstx265*|libgstsvtav1*|libgstrav1e*)
+              echo "Skipping plugin not used for local playback: $f" ;;
             *) cp -v "$f" output/lib/gstreamer-1.0/ ;;
           esac
         done
