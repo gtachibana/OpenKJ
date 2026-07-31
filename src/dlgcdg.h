@@ -100,6 +100,57 @@ private:
 };
 
 
+// Reactions tapped from the room, floating up over the karaoke video. Same
+// constraints as PitchCueWidget - it cannot go through DlgCdg::showAlert(), and it
+// composites inside its own paintEvent rather than through a graphics effect - but
+// it covers the whole window, because the point is emoji drifting across the video
+// rather than a badge in one corner.
+//
+// The animation timer only runs while something is on screen: cheers are sporadic,
+// and a 30fps repaint ticking through an entire show for nothing would be a poor
+// trade on the machine that is also decoding video.
+class CheerWidget : public QWidget {
+Q_OBJECT
+public:
+    explicit CheerWidget(QWidget *parent = nullptr);
+    // count is how many of this reaction arrived in the batch; songTotal is the
+    // running tally drawn in the corner.
+    void addCheers(const QString &reaction, int count, int songTotal);
+
+protected:
+    void paintEvent(QPaintEvent *) override;
+
+private:
+    struct Particle {
+        QString glyph;
+        // Fractions of the widget, so a resize - or a fullscreen transition - moves
+        // everything in flight rather than stranding it off screen.
+        qreal x{0.5};
+        qreal progress{0.0};
+        qreal speed{0.015};
+        qreal drift{0.0};
+        qreal phase{0.0};
+        qreal scale{1.0};
+    };
+
+    QList<Particle> m_particles;
+    QTimer m_animTimer;
+    int m_total{0};
+    QFont m_glyphFont;
+    QFont m_counterFont;
+
+    static constexpr int c_tickMs = 33;
+    // A hard ceiling on what one batch and one screen can hold. A packed room can
+    // out-tap any sane animation, and past this the screen is a solid wall of emoji
+    // anyway - so the excess is counted but not drawn.
+    static constexpr int c_maxParticles = 90;
+    static constexpr int c_maxPerBatch = 12;
+
+    static QString glyphFor(const QString &reaction);
+    void onTick();
+};
+
+
 namespace Ui {
     class DlgCdg;
 }
@@ -122,6 +173,7 @@ private:
     MediaBackend &m_bmb;
     std::unique_ptr<TransparentWidget> m_tWidget;
     std::unique_ptr<PitchCueWidget> m_pitchCue;
+    std::unique_ptr<CheerWidget> m_cheers;
     Settings m_settings;
 public:
     explicit DlgCdg(MediaBackend &KaraokeBackend, MediaBackend &BreakBackend, QWidget *parent = nullptr,
@@ -139,6 +191,8 @@ public slots:
     void showAlert(bool show);
     // semitones is the resulting absolute key, up is the direction it just moved.
     void showPitchCue(int semitones, bool up);
+    // One batch of reactions from the room, as coalesced by the embedded API.
+    void showCheers(const QString &reaction, int count, int songTotal);
     void setNextSinger(const QString &name);
     void setNextSong(const QString &song);
     void setCountdownSecs(int seconds);

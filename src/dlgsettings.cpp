@@ -128,6 +128,7 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     ui->cbxRotShowNextSong->setChecked(m_settings.rotationShowNextSong());
     ui->checkBoxCdgPrescaling->setChecked(m_settings.cdgPrescalingEnabled());
     ui->checkBoxPitchCue->setChecked(m_settings.cdgPitchCueEnabled());
+    ui->checkBoxCheers->setChecked(m_settings.cheersEnabled());
     ui->checkBoxCurrentSingerTop->setChecked(m_settings.rotationAltSortOrder());
     audioOutputDevices = kAudioBackend.getOutputDevices();
     ui->comboBoxKAudioDevices->addItems(audioOutputDevices);
@@ -1013,6 +1014,10 @@ void DlgSettings::on_groupBoxShowDuration_clicked(bool checked) {
 
 void DlgSettings::on_checkBoxPitchCue_clicked(bool checked) {
     m_settings.setCdgPitchCueEnabled(checked);
+}
+
+void DlgSettings::on_checkBoxCheers_clicked(bool checked) {
+    m_settings.setCheersEnabled(checked);
 }
 
 void DlgSettings::on_btnDurationFont_clicked() {

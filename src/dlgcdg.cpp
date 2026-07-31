@@ -26,7 +26,10 @@
 #include <QDir>
 #include <QImageReader>
 #include <QWindow>
+#include <QRandomGenerator>
 #include <algorithm>
+#include <cmath>
+#include <iterator>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -53,6 +56,9 @@ DlgCdg::DlgCdg(MediaBackend &KaraokeBackend, MediaBackend &BreakBackend, QWidget
     m_pitchCue = std::make_unique<PitchCueWidget>(this);
     m_pitchCue->setObjectName("PitchCue");
     m_pitchCue->hide();
+    m_cheers = std::make_unique<CheerWidget>(this);
+    m_cheers->setObjectName("Cheers");
+    m_cheers->hide();
     ui->videoDisplayKar->setFillOnPaint(false);
     ui->widgetAlert->setAutoFillBackground(true);
     ui->fsToggleWidget->hide();
@@ -247,6 +253,24 @@ void DlgCdg::showPitchCue(const int semitones, const bool up)
     m_pitchCue->move(width() - m_pitchCue->width() - margin, margin);
     m_pitchCue->raise();
     m_pitchCue->showCue(semitones, up);
+}
+
+void DlgCdg::showCheers(const QString &reaction, const int count, const int songTotal)
+{
+    if (!m_settings.cheersEnabled())
+        return;
+
+    // Resized on every batch rather than from a resizeEvent, for the same reason the
+    // key cue is: it keeps this out of DlgCdg's geometry handling, which fullscreen
+    // transitions already make delicate. Batches arrive every 250ms while the room is
+    // cheering, so a window that changed size mid-ovation corrects itself immediately.
+    // Drawn over everything, the between-songs alert screen included. That screen is
+    // opaque, so anything behind it is simply not there - and the ovation as a song
+    // ends is the moment this feature exists for, which is exactly when that screen
+    // is up. The overlay is transparent apart from the glyphs themselves, so the
+    // alert's text stays readable underneath.
+    m_cheers->setGeometry(rect());
+    m_cheers->addCheers(reaction, count, songTotal);
 }
 
 void DlgCdg::alertBgColorChanged(const QColor &color)
@@ -590,6 +614,161 @@ void PitchCueWidget::onFadeTick()
     }
     m_opacity = 1.0 - (static_cast<qreal>(fadeElapsed) / c_fadeMs);
     update();
+}
+
+CheerWidget::CheerWidget(QWidget *parent)
+        : QWidget(parent)
+{
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setFocusPolicy(Qt::NoFocus);
+
+    // Named families rather than whatever the widget inherited: the glyphs are
+    // emoji, and the UI font on none of the three platforms carries them. Qt walks
+    // this list and uses the first one present, so listing all three keeps a single
+    // build working everywhere.
+    m_glyphFont.setFamilies({"Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji"});
+    m_counterFont = font();
+    m_counterFont.setBold(true);
+
+    m_animTimer.setInterval(c_tickMs);
+    connect(&m_animTimer, &QTimer::timeout, this, &CheerWidget::onTick);
+}
+
+// Built from code points for the same reason PitchCueWidget's arrows are: it keeps
+// the glyphs independent of how a compiler decides to read this file's encoding.
+QString CheerWidget::glyphFor(const QString &reaction)
+{
+    char32_t codePoint = 0x1F44F; // CLAPPING HANDS SIGN, and the fallback
+    if (reaction == QLatin1String("fire"))
+        codePoint = 0x1F525;
+    else if (reaction == QLatin1String("heart"))
+        codePoint = 0x1F496; // SPARKLING HEART - one code point, no variation selector
+    else if (reaction == QLatin1String("star"))
+        codePoint = 0x2B50;
+    else if (reaction == QLatin1String("party"))
+        codePoint = 0x1F389;
+    return QString::fromUcs4(&codePoint, 1);
+}
+
+void CheerWidget::addCheers(const QString &reaction, const int count, const int songTotal)
+{
+    m_total = songTotal;
+
+    const QString glyph = glyphFor(reaction);
+    auto *rng = QRandomGenerator::global();
+    const int spawn = std::min({count, c_maxPerBatch, c_maxParticles - static_cast<int>(m_particles.size())});
+    for (int i = 0; i < spawn; ++i) {
+        Particle particle;
+        particle.glyph = glyph;
+        // Kept off the extreme edges so a wide glyph never half-hangs off the screen.
+        particle.x = 0.08 + rng->generateDouble() * 0.84;
+        particle.speed = 0.010 + rng->generateDouble() * 0.010;
+        particle.drift = 0.02 + rng->generateDouble() * 0.05;
+        particle.phase = rng->generateDouble() * 6.283;
+        particle.scale = 0.75 + rng->generateDouble() * 0.5;
+        // Spread the batch down past the bottom edge so a burst rises as a stream
+        // rather than as one rank of emoji moving in lockstep.
+        particle.progress = -(rng->generateDouble() * 0.25);
+        m_particles.append(particle);
+    }
+
+    show();
+    raise();
+    if (!m_animTimer.isActive())
+        m_animTimer.start();
+    update();
+}
+
+void CheerWidget::onTick()
+{
+    for (auto it = m_particles.begin(); it != m_particles.end();) {
+        it->progress += it->speed;
+        it = (it->progress >= 1.0) ? m_particles.erase(it) : std::next(it);
+    }
+
+    if (m_particles.isEmpty()) {
+        m_animTimer.stop();
+        hide();
+        return;
+    }
+    update();
+}
+
+void CheerWidget::paintEvent(QPaintEvent *)
+{
+    if (m_particles.isEmpty())
+        return;
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+
+    const int baseSize = std::max(16, height() / 14);
+    for (const Particle &particle : m_particles) {
+        if (particle.progress < 0.0)
+            continue;
+
+        // Fade in off the bottom edge and back out at the top, so nothing pops into
+        // or out of existence mid-screen.
+        qreal opacity = 1.0;
+        if (particle.progress < 0.12)
+            opacity = particle.progress / 0.12;
+        else if (particle.progress > 0.75)
+            opacity = 1.0 - ((particle.progress - 0.75) / 0.25);
+        painter.setOpacity(std::clamp(opacity, 0.0, 1.0));
+
+        QFont glyphFont = m_glyphFont;
+        glyphFont.setPixelSize(std::max(8, static_cast<int>(baseSize * particle.scale)));
+        painter.setFont(glyphFont);
+
+        const qreal sway = particle.drift * std::sin(particle.phase + particle.progress * 9.0);
+        const int x = static_cast<int>((particle.x + sway) * width());
+        // Travels from just below the bottom edge to just above the top.
+        const int y = static_cast<int>((1.10 - particle.progress * 1.20) * height());
+
+        const int box = glyphFont.pixelSize() * 2;
+        painter.drawText(QRect(x - box / 2, y - box / 2, box, box), Qt::AlignCenter, particle.glyph);
+    }
+
+    if (m_total <= 0)
+        return;
+
+    // The tally, low and left - the duration timer sits top-left by default and the
+    // key cue takes the top-right corner.
+    painter.setOpacity(0.85);
+    QFont counterFont = m_counterFont;
+    counterFont.setPixelSize(std::max(14, height() / 22));
+    painter.setFont(counterFont);
+
+    // Glyph and number are drawn in separate passes with their own fonts. Setting one
+    // font for the whole string would leave either the digits to an emoji font or the
+    // emoji to Qt's fallback, and this way neither is left to chance.
+    QFont badgeGlyphFont = m_glyphFont;
+    badgeGlyphFont.setPixelSize(counterFont.pixelSize());
+
+    const QString glyph = glyphFor("clap");
+    const QString count = QString::number(m_total);
+    const QFontMetrics glyphMetrics(badgeGlyphFont);
+    const QFontMetrics countMetrics(counterFont);
+    const int padding = countMetrics.height() / 2;
+    const int glyphWidth = glyphMetrics.horizontalAdvance(glyph);
+    const int countWidth = countMetrics.horizontalAdvance(count);
+
+    const int margin = std::max(12, width() / 40);
+    QRect box(0, 0, glyphWidth + countWidth + padding * 3, countMetrics.height() * 3 / 2);
+    box.moveBottomLeft(QPoint(margin, height() - margin));
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 0xb0));
+    painter.drawRoundedRect(box, box.height() / 4.0, box.height() / 4.0);
+
+    painter.setPen(QColor(0xff, 0xff, 0xff));
+    painter.setFont(badgeGlyphFont);
+    painter.drawText(QRect(box.left() + padding, box.top(), glyphWidth, box.height()),
+                     Qt::AlignCenter, glyph);
+    painter.setFont(counterFont);
+    painter.drawText(QRect(box.left() + padding * 2 + glyphWidth, box.top(), countWidth, box.height()),
+                     Qt::AlignCenter, count);
 }
 
 void PitchCueWidget::paintEvent(QPaintEvent *)

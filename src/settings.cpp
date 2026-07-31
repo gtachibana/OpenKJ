@@ -1937,6 +1937,16 @@ void Settings::setCdgPitchCueEnabled(bool enabled)
     settings->setValue("cdgPitchCueEnabled", enabled);
 }
 
+bool Settings::cheersEnabled()
+{
+    return settings->value("cheersEnabled", true).toBool();
+}
+
+void Settings::setCheersEnabled(bool enabled)
+{
+    settings->setValue("cheersEnabled", enabled);
+}
+
 int Settings::lastRunRotationTopSingerId() {
     return settings->value("lastRunRotationTopSingerId", -1).toInt();
 }
