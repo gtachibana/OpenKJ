@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/async_logger.h>
 
+#include "librarymerger.h"
 #include "okjfmt.h"
 
 // Finds artist and title strings in dbSongs that look like variants of each
@@ -89,6 +90,9 @@ public:
 
     struct RenamePlan {
         std::vector<Rename> renames;
+        // Songs whose corrected filename is already taken. Rather than being
+        // left alone, the two sets are collapsed into one - see LibraryMerger.
+        std::vector<LibraryMerger::Conflict> merges;
         // One line per song left alone, saying why. These are corrected in the
         // database anyway - only their files are untouched.
         QStringList keptAsIs;
@@ -96,7 +100,10 @@ public:
         // matters can be answered from numbers rather than by scrolling a list.
         QMap<QString, int> keptAsIsByCause;
 
-        [[nodiscard]] bool isEmpty() const { return renames.empty(); }
+        [[nodiscard]] bool isEmpty() const { return renames.empty() && merges.empty(); }
+        // How many of the merges bin the spare set, and how many set it aside
+        // for a look later. The two read very differently in a confirm dialog.
+        [[nodiscard]] int countOf(LibraryMerger::Disposal disposal) const;
     };
 
     // Works out which of the songs these proposals touch can have their files

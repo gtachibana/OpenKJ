@@ -500,9 +500,12 @@ LibraryNameCleaner::RenamePlan LibraryNameCleaner::planRenames(const std::vector
     }
 
     auto resolver = std::make_shared<KaraokeFilePatternResolver>();
-    // Two songs can be corrected to the same name; the second one to ask for a
-    // filename has to be turned away.
-    QSet<QString> claimedPaths;
+    LibraryMerger merger(m_logger);
+    // Two songs can be corrected to the same name. The second one to ask finds
+    // the name spoken for by a file that has not moved yet, so what is recorded
+    // against each claim is where the claimant still is - that is the file the
+    // loser has to be compared against.
+    QHash<QString, QString> claimedPaths;
 
     while (query.next()) {
         const QString artist = query.value(2).toString();
@@ -575,11 +578,59 @@ LibraryNameCleaner::RenamePlan LibraryNameCleaner::planRenames(const std::vector
             continue;
         }
 
-        if (QFile::exists(newMain) || claimedPaths.contains(newMain)) {
-            plan.keptAsIs.append(tr("%1 - a file called \"%2\" is already there")
-                                         .arg(info.fileName(), newBaseName + "." + info.suffix()));
-            plan.keptAsIsByCause[tr("a file of that name is already there")]++;
-            continue;
+        // The name may be occupied by this very file. Correcting a shouted
+        // artist to mixed case - exactly what preferAsCanonical goes looking for
+        // - changes nothing but the capitalisation, and Windows does not tell
+        // the two names apart, so the file appears to be standing in its own
+        // way. Asking the filesystem for identity is the only thing that
+        // separates that from a real duplicate, which is what the two spellings
+        // would be on a case-sensitive filesystem.
+        //
+        // QFile::rename handles the case change itself once it gets there - it
+        // compares file ids and lets the rename through - so all that is needed
+        // here is to keep the merge path from being handed a file to compare
+        // against itself.
+        const bool renamingOntoItself = LibraryMerger::sameFileOnDisk(newMain, path);
+
+        // The wanted name is taken by something else. Two files wanting one name
+        // means the library holds the song twice, so instead of standing off the
+        // pair is collapsed into one - by binning the spare when the graphics
+        // match, or setting it aside for review when they do not.
+        //
+        // An occupant that is only *claimed* has not moved yet, so what the
+        // comparison needs is where it still is, not where it is going.
+        QString occupant;
+        if (!renamingOntoItself) {
+            // The claim is consulted before the disk, not after. A song promised
+            // this name may still be sitting under its old one - and when that
+            // old name differs only in capitalisation the disk looks occupied by
+            // a file whose path the database does not hold, which would see the
+            // claimant taken for an unimported stray and binned.
+            if (const auto claimed = claimedPaths.constFind(newMain); claimed != claimedPaths.constEnd())
+                occupant = claimed.value();
+            else if (QFile::exists(newMain))
+                occupant = newMain;
+        }
+
+        if (!occupant.isEmpty()) {
+            LibraryMerger::Conflict conflict;
+            QString inspectError;
+            if (!merger.inspect(songId, path, occupant, conflict, inspectError)) {
+                plan.keptAsIs.append(tr("%1 - a file called \"%2\" is already there and the two could not be "
+                                        "compared (%3)")
+                                             .arg(info.fileName(), newBaseName + "." + info.suffix(),
+                                                  inspectError));
+                plan.keptAsIsByCause[tr("a file of that name is already there")]++;
+                continue;
+            }
+            plan.merges.push_back(conflict);
+
+            // When the occupant is a file nothing has imported, it is the one
+            // that gives way and this song still gets the name it asked for.
+            // Otherwise this song's row is the one folded away, so there is
+            // nothing left to rename.
+            if (!conflict.losingAnOrphan())
+                continue;
         }
 
         Rename rename;
@@ -597,7 +648,17 @@ LibraryNameCleaner::RenamePlan LibraryNameCleaner::planRenames(const std::vector
             if (!rename.fromAudio.isEmpty()) {
                 rename.toAudio = QDir(info.absolutePath())
                         .absoluteFilePath(newBaseName + "." + QFileInfo(rename.fromAudio).suffix());
-                if (QFile::exists(rename.toAudio) || claimedPaths.contains(rename.toAudio)) {
+                // The audio's extension is carried over from the file it already
+                // is, so whenever the main file is only changing capitalisation
+                // its companion is too - and is likewise in its own way rather
+                // than anybody else's.
+                const bool audioOntoItself = LibraryMerger::sameFileOnDisk(rename.toAudio, rename.fromAudio);
+
+                // A stray audio file sitting on the wanted name with no CDG
+                // beside it is not a duplicate song, so there is no pair to
+                // collapse and the merge path has nothing to say about it.
+                if (!audioOntoItself
+                    && (QFile::exists(rename.toAudio) || claimedPaths.contains(rename.toAudio))) {
                     plan.keptAsIs.append(tr("%1 - its audio file cannot be renamed, something of that "
                                             "name is already there").arg(info.fileName()));
                     plan.keptAsIsByCause[tr("a file of that name is already there")]++;
@@ -606,16 +667,23 @@ LibraryNameCleaner::RenamePlan LibraryNameCleaner::planRenames(const std::vector
             }
         }
 
-        claimedPaths.insert(rename.toMain);
+        claimedPaths.insert(rename.toMain, rename.fromMain);
         if (!rename.toAudio.isEmpty())
-            claimedPaths.insert(rename.toAudio);
+            claimedPaths.insert(rename.toAudio, rename.fromAudio);
         plan.renames.push_back(rename);
     }
 
     if (m_logger)
-        m_logger->info("{} {} songs can be renamed on disk, {} kept as is", m_loggingPrefix, plan.renames.size(),
-                       plan.keptAsIs.size());
+        m_logger->info("{} {} songs can be renamed on disk, {} merged into an existing copy, {} kept as is",
+                       m_loggingPrefix, plan.renames.size(), plan.merges.size(), plan.keptAsIs.size());
     return plan;
+}
+
+int LibraryNameCleaner::RenamePlan::countOf(LibraryMerger::Disposal disposal) const {
+    return (int) std::count_if(merges.begin(), merges.end(),
+                               [disposal](const LibraryMerger::Conflict &conflict) {
+                                   return conflict.disposal == disposal;
+                               });
 }
 
 bool LibraryNameCleaner::repointSong(const Rename &rename, QString &error) {
@@ -753,6 +821,39 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals, const Re
         }
     }
 
+    // Merges come before the renames, because a merge is what frees the name a
+    // rename is waiting on.
+    //
+    // The two halves of one land on opposite sides of the commit. Folding a row
+    // is reversible and stays in the transaction; disposing of the files is not,
+    // so it waits until the commit has landed. The exception is an orphan: it
+    // has no row to fold, and its file is standing on a name the rename phase is
+    // about to want, so that one goes now.
+    LibraryMerger merger(m_logger);
+    std::vector<LibraryMerger::Conflict> folded;
+    // Only what actually happened, so the journal can be trusted to list every
+    // file that moved and nothing that did not.
+    std::vector<LibraryMerger::Conflict> merged;
+    for (const auto &conflict : renames.merges) {
+        QString mergeError;
+        if (conflict.losingAnOrphan()) {
+            if (!merger.disposeFiles(conflict, LibraryMerger::resolveReviewDir(conflict.loserMain), mergeError))
+                m_warnings.append(tr("Could not move %1 out of the way (%2)")
+                                          .arg(QFileInfo(conflict.loserMain).fileName(), mergeError));
+            else
+                merged.push_back(conflict);
+            continue;
+        }
+        if (!merger.foldRow(conflict, mergeError)) {
+            m_warnings.append(tr("Could not merge %1 into %2 (%3), left both alone")
+                                      .arg(QFileInfo(conflict.loserMain).fileName(),
+                                           QFileInfo(conflict.winnerMain).fileName(), mergeError));
+            continue;
+        }
+        folded.push_back(conflict);
+        songsChanged.insert(conflict.loserSongId);
+    }
+
     // Files come last, so a song whose files will not move still keeps the
     // correction in the database. A failure here is a warning, not a rollback.
     std::vector<Rename> renamed;
@@ -764,7 +865,19 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals, const Re
         }
     };
 
-    for (const auto &rename : renames.renames) {
+    for (auto rename : renames.renames) {
+        // A merge above may have replaced this song's audio with a better copy
+        // carrying a different extension, in which case the companion worked out
+        // at plan time is no longer there. Re-resolving costs a stat and saves
+        // the rename failing over a file that was deliberately improved.
+        if (!rename.fromAudio.isEmpty() && !QFile::exists(rename.fromAudio)) {
+            rename.fromAudio = findMatchingAudioFile(rename.fromMain);
+            rename.toAudio = rename.fromAudio.isEmpty()
+                                     ? QString()
+                                     : QDir(QFileInfo(rename.fromMain).absolutePath())
+                                               .absoluteFilePath(rename.newBaseName + "."
+                                                                 + QFileInfo(rename.fromAudio).suffix());
+        }
         if (!QFile::rename(rename.fromMain, rename.toMain)) {
             m_warnings.append(tr("Could not rename %1, its name in OpenKJ was corrected anyway")
                                       .arg(QFileInfo(rename.fromMain).fileName()));
@@ -803,6 +916,21 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals, const Re
         return 0;
     }
 
+    // The commit landed, so the folded rows are gone for good and the files they
+    // named can follow them. A failure here leaves those files on disk with no
+    // row of their own, which the next library scan simply imports again - worth
+    // saying, but not worth failing the run over.
+    for (const auto &conflict : folded) {
+        QString disposeError;
+        if (!merger.disposeFiles(conflict, LibraryMerger::resolveReviewDir(conflict.loserMain), disposeError))
+            m_warnings.append(tr("%1 was merged into %2, but its files could not be moved (%3) - they are "
+                                 "still on disk and will be imported again on the next library scan")
+                                      .arg(QFileInfo(conflict.loserMain).fileName(),
+                                           QFileInfo(conflict.winnerMain).fileName(), disposeError));
+        else
+            merged.push_back(conflict);
+    }
+
     QDir dataDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
     m_journalPath = dataDir.absoluteFilePath(
             "namefix-" + QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss") + ".csv");
@@ -823,6 +951,17 @@ int LibraryNameCleaner::execute(const std::vector<Proposal> &proposals, const Re
             if (!rename.fromAudio.isEmpty())
                 stream << "file,audio,," << csvEscape(rename.fromAudio) << ',' << csvEscape(rename.toAudio)
                        << '\n';
+        }
+        // Merges name the file that went and the one it was folded into, so a
+        // set fished back out of the Recycle Bin can be put where it belongs.
+        for (const auto &conflict : merged) {
+            const QString kind = (conflict.disposal == LibraryMerger::Disposal::Recycled) ? "merge_recycled"
+                                                                                         : "merge_setaside";
+            stream << csvEscape(kind) << ",main,," << csvEscape(conflict.loserMain) << ','
+                   << csvEscape(conflict.winnerMain) << '\n';
+            if (!conflict.loserAudio.isEmpty())
+                stream << csvEscape(kind) << ",audio,," << csvEscape(conflict.loserAudio) << ','
+                       << csvEscape(conflict.winnerAudio) << '\n';
         }
     } else {
         m_journalPath.clear();

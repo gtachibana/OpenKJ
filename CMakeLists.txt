@@ -477,6 +477,7 @@ set(SOURCE_FILES
         src/dlgeditsong.cpp
         src/dlgnamecleanup.cpp
         src/librarynamecleaner.cpp
+        src/librarymerger.cpp
         src/soundfxbutton.cpp
         src/runguard/runguard.cpp
         src/durationlazyupdater.cpp
@@ -544,6 +545,7 @@ set(SOURCE_FILES
         src/dlgeditsong.h
         src/dlgnamecleanup.h
         src/librarynamecleaner.h
+        src/librarymerger.h
         src/soundfxbutton.h
         src/runguard/runguard.h
         src/models/tableviewtooltipfilter.h
