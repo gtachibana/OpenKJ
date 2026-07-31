@@ -208,7 +208,7 @@ void OpenKJEmbeddedApi::onSocketReadyRead()
         }
     }
 
-    m_currentClientKey = socket->peerAddress().toString();
+    m_currentClientKey = clientKeyForRequest(socket, request);
     const QByteArray response = handleRequest(request);
     m_currentClientKey.clear();
     socket->write(response);
@@ -251,6 +251,69 @@ void OpenKJEmbeddedApi::sweepIdleConnections()
     for (auto it = m_cheerBuckets.begin(); it != m_cheerBuckets.end();) {
         it = (now - it.value().lastRefillMs < fullRefillMs) ? std::next(it) : m_cheerBuckets.erase(it);
     }
+}
+
+bool OpenKJEmbeddedApi::isTrustedProxy(const QHostAddress &peer)
+{
+    // A tunnel or reverse proxy on this machine is the normal deployment, and it
+    // connects over the loopback interface. Nothing else can reach that address, so
+    // believing it needs no configuration.
+    if (peer.isLoopback()) {
+        return true;
+    }
+
+    const QString configured = m_settings.embeddedApiTrustedProxies().trimmed();
+    if (configured.isEmpty()) {
+        return false;
+    }
+
+    const QStringList entries = configured.split(',', Qt::SkipEmptyParts);
+    for (const QString &entry : entries) {
+        QHostAddress candidate;
+        // ConvertV4MappedToIPv4 so a v4 peer arriving on a dual-stack listener still
+        // matches the plain v4 address an operator would have written down.
+        if (candidate.setAddress(entry.trimmed())
+            && candidate.isEqual(peer, QHostAddress::ConvertV4MappedToIPv4)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Getting this wrong is not a cosmetic problem. Both rate limiters key on the value
+// this returns: the cheer bucket, which would otherwise let one enthusiastic phone
+// throttle an entire room's applause, and the login lockout, which would otherwise
+// let one person's fumbled password lock every singer - and the KJ - out for five
+// minutes at a time.
+QString OpenKJEmbeddedApi::clientKeyForRequest(QTcpSocket *socket, const HttpRequest &request)
+{
+    const QHostAddress peer = socket->peerAddress();
+    const QString peerKey = peer.toString();
+    if (!isTrustedProxy(peer)) {
+        return peerKey;
+    }
+
+    // Cloudflare's header first: the edge sets it and discards any copy the client
+    // sent, so it cannot be spoofed from outside. X-Forwarded-For is the general
+    // fallback, where the leftmost entry is the original client and the rest are
+    // proxies it passed through.
+    QString forwarded = request.headers.value("cf-connecting-ip");
+    if (forwarded.isEmpty()) {
+        forwarded = request.headers.value("x-forwarded-for").section(',', 0, 0);
+    }
+    forwarded = forwarded.trimmed();
+    if (forwarded.isEmpty()) {
+        return peerKey;
+    }
+
+    // Parsed rather than used as written. These strings become hash keys held until
+    // the idle sweep clears them, and a proxy that ever forwarded something other
+    // than an address should not be able to grow that table a row at a time.
+    QHostAddress parsed;
+    if (!parsed.setAddress(forwarded)) {
+        return peerKey;
+    }
+    return parsed.toString();
 }
 
 void OpenKJEmbeddedApi::sendErrorAndClose(QTcpSocket *socket, const int statusCode, const QString &message)

@@ -279,6 +279,13 @@ public:
     // How many turns ahead of the mic a singer gets an "up next" event pushed to
     // their phone. 0 turns the events off entirely.
     int embeddedApiUpNextTurns();
+    // Addresses whose forwarded-client headers may be believed, comma separated.
+    // Loopback is always trusted, which covers a tunnel or reverse proxy running on
+    // this machine and pointed at localhost; this is only needed when the proxy
+    // reaches the server over the network instead. Registry-only - there is no field
+    // for it in the settings dialog, because getting it wrong hands anyone who can
+    // reach the port the ability to forge their own address.
+    QString embeddedApiTrustedProxies();
     void setEmbeddedApiEnabled(bool enabled);
     void setEmbeddedApiPort(int port);
     void setEmbeddedApiBindAddress(const QString &address);

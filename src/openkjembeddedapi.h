@@ -2,6 +2,7 @@
 #define OPENKJEMBEDDEDAPI_H
 
 #include <QObject>
+#include <QHostAddress>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QHash>
@@ -131,7 +132,8 @@ private:
     // re-arms them for their next turn around the rotation.
     QSet<QString> m_upNextNotified;
 
-    // Peer address of the request currently being handled. The handlers are plain
+    // Address of the client currently being served - the socket peer, or the address
+    // it was forwarded from when the peer is a trusted proxy. The handlers are plain
     // JSON-in/JSON-out functions with no socket access, and only the auth ones care
     // who is calling; stashing it here beats threading it through every signature.
     // Safe because handling is synchronous and single-threaded.
@@ -167,6 +169,12 @@ private:
     void writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data);
 
     void sendErrorAndClose(QTcpSocket *socket, int statusCode, const QString &message);
+    // What the rate limiters key on. Behind a proxy every request arrives from the
+    // proxy's own address, which would collapse the whole room into one bucket, so a
+    // forwarded client address is preferred - but only from a hop we trust, since
+    // otherwise it is just a header the client picked.
+    QString clientKeyForRequest(QTcpSocket *socket, const HttpRequest &request);
+    bool isTrustedProxy(const QHostAddress &peer);
     // Rejects further login attempts from m_currentClientKey once it has failed too
     // many times in a row. Applies to the shared admin password as much as to singer
     // accounts - the admin password is the more valuable of the two to guess.

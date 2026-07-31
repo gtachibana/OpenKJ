@@ -1741,6 +1741,14 @@ int Settings::embeddedApiUpNextTurns()
     return std::clamp(scopedValue("embeddedApiUpNextTurns", 1, false, LocalMode).toInt(), 0, 5);
 }
 
+QString Settings::embeddedApiTrustedProxies()
+{
+    // Empty by default: trusting a forwarded address is only safe when something
+    // in front of the server is guaranteed to overwrite it, so an operator has to
+    // name that hop deliberately.
+    return scopedValue("embeddedApiTrustedProxies", "", false, LocalMode).toString();
+}
+
 void Settings::setEmbeddedApiEnabled(bool enabled)
 {
     setScopedValue("embeddedApiEnabled", enabled, LocalMode);
