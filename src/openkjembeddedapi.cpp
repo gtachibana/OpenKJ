@@ -421,7 +421,6 @@ QByteArray OpenKJEmbeddedApi::snapshotFingerprint(const QJsonObject &snapshot)
 {
     QJsonObject stable = snapshot;
     stable.insert("requests", strippedEntries(snapshot.value("requests").toArray()));
-    stable.insert("up_next", strippedEntries(snapshot.value("up_next").toArray()));
     stable.insert("recently_played", strippedEntries(snapshot.value("recently_played").toArray()));
 
     QJsonObject nowPlaying = snapshot.value("now_playing").toObject();
@@ -442,8 +441,8 @@ QByteArray OpenKJEmbeddedApi::snapshotFingerprint(const QJsonObject &snapshot)
 QJsonObject OpenKJEmbeddedApi::snapshotTick(const QJsonObject &snapshot)
 {
     // Keyed by request id rather than sent as an array, because a client applying
-    // this has to find the entry it belongs to - and "requests" and "up_next" carry
-    // the same entries, so one map updates both.
+    // this has to find the entry it belongs to, and position in the array is not a
+    // stable way to do that.
     QJsonObject waits;
     const QJsonArray requests = snapshot.value("requests").toArray();
     for (const auto &value : requests) {
@@ -1116,7 +1115,6 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     query.bindValue(":nowSinger", nowSingerId);
 
     QJsonArray requests;
-    QJsonArray upNext;
     if (query.exec()) {
         while (query.next()) {
             const int singerPosition = query.value(8).toInt();
@@ -1133,7 +1131,6 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             request.insert("wait_seconds", m_rotationModel.positionWaitTime(singerPosition));
             request.insert("request_time", QDateTime::currentSecsSinceEpoch());
             requests.append(request);
-            upNext.append(request);
         }
     }
 
@@ -1168,7 +1165,6 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
                 request.insert("wait_seconds", 0);
                 request.insert("request_time", QDateTime::currentSecsSinceEpoch());
                 requests.append(request);
-                upNext.append(request);
             }
         }
     }
@@ -1204,7 +1200,9 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     out.insert("serial", m_settings.embeddedApiSerial());
     out.insert("requests", requests);
     out.insert("now_playing", nowPlaying);
-    out.insert("up_next", upNext);
+    // No "up_next": it was a byte-for-byte copy of "requests", doubling the largest
+    // part of every snapshot for nothing. "requests" is already in rotation order,
+    // so the head of it is what up next ever meant.
     out.insert("recently_played", recentlyPlayed);
     return out;
 }
