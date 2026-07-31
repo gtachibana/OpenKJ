@@ -70,6 +70,28 @@ constexpr int kCheerRefillPerSecMilli = 2000;
 // the screen and the event stream see them. Matches the SSE coalescing interval.
 constexpr int kCheerFlushMs = 250;
 
+// A snapshot is rebuilt from scratch on every broadcast, and these fields are
+// recomputed from the clock or from the remaining time on the current song each
+// time - so consecutive snapshots of an unchanged show never match byte for byte.
+// Stripping them is what lets a broadcast recognise that nothing happened.
+void stripVolatileFields(QJsonObject &entry)
+{
+    entry.remove("request_time");
+    entry.remove("played_at");
+    entry.remove("wait_seconds");
+}
+
+QJsonArray strippedEntries(const QJsonArray &entries)
+{
+    QJsonArray out;
+    for (const auto &value : entries) {
+        QJsonObject entry = value.toObject();
+        stripVolatileFields(entry);
+        out.append(entry);
+    }
+    return out;
+}
+
 } // namespace
 
 OpenKJEmbeddedApi::OpenKJEmbeddedApi(TableModelRotation &rotationModel,
@@ -132,9 +154,14 @@ void OpenKJEmbeddedApi::stop()
     m_cheerFlushTimer.stop();
     m_idleSweepTimer.stop();
     m_sseClients.clear();
+    m_sseDeltaClients.clear();
     m_upNextNotified.clear();
     m_cheerPending.clear();
     m_cheerBuckets.clear();
+    // Nothing to be a delta against once every subscriber is gone, so the next run
+    // must start by sending somebody a whole snapshot.
+    m_lastSnapshotFingerprint.clear();
+    m_lastTick.clear();
 
     for (QTcpSocket *socket : m_connections.keys()) {
         socket->disconnectFromHost();
@@ -203,12 +230,12 @@ void OpenKJEmbeddedApi::onSocketReadyRead()
         QUrlQuery query;
         parseRequestPath(request.path, cleanPath, query);
         if (cleanPath == "/local/events") {
-            beginEventStream(socket);
+            beginEventStream(socket, query);
             return;
         }
     }
 
-    m_currentClientKey = socket->peerAddress().toString();
+    m_currentClientKey = clientKeyForRequest(socket, request);
     const QByteArray response = handleRequest(request);
     m_currentClientKey.clear();
     socket->write(response);
@@ -253,6 +280,69 @@ void OpenKJEmbeddedApi::sweepIdleConnections()
     }
 }
 
+bool OpenKJEmbeddedApi::isTrustedProxy(const QHostAddress &peer)
+{
+    // A tunnel or reverse proxy on this machine is the normal deployment, and it
+    // connects over the loopback interface. Nothing else can reach that address, so
+    // believing it needs no configuration.
+    if (peer.isLoopback()) {
+        return true;
+    }
+
+    const QString configured = m_settings.embeddedApiTrustedProxies().trimmed();
+    if (configured.isEmpty()) {
+        return false;
+    }
+
+    const QStringList entries = configured.split(',', Qt::SkipEmptyParts);
+    for (const QString &entry : entries) {
+        QHostAddress candidate;
+        // ConvertV4MappedToIPv4 so a v4 peer arriving on a dual-stack listener still
+        // matches the plain v4 address an operator would have written down.
+        if (candidate.setAddress(entry.trimmed())
+            && candidate.isEqual(peer, QHostAddress::ConvertV4MappedToIPv4)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Getting this wrong is not a cosmetic problem. Both rate limiters key on the value
+// this returns: the cheer bucket, which would otherwise let one enthusiastic phone
+// throttle an entire room's applause, and the login lockout, which would otherwise
+// let one person's fumbled password lock every singer - and the KJ - out for five
+// minutes at a time.
+QString OpenKJEmbeddedApi::clientKeyForRequest(QTcpSocket *socket, const HttpRequest &request)
+{
+    const QHostAddress peer = socket->peerAddress();
+    const QString peerKey = peer.toString();
+    if (!isTrustedProxy(peer)) {
+        return peerKey;
+    }
+
+    // Cloudflare's header first: the edge sets it and discards any copy the client
+    // sent, so it cannot be spoofed from outside. X-Forwarded-For is the general
+    // fallback, where the leftmost entry is the original client and the rest are
+    // proxies it passed through.
+    QString forwarded = request.headers.value("cf-connecting-ip");
+    if (forwarded.isEmpty()) {
+        forwarded = request.headers.value("x-forwarded-for").section(',', 0, 0);
+    }
+    forwarded = forwarded.trimmed();
+    if (forwarded.isEmpty()) {
+        return peerKey;
+    }
+
+    // Parsed rather than used as written. These strings become hash keys held until
+    // the idle sweep clears them, and a proxy that ever forwarded something other
+    // than an address should not be able to grow that table a row at a time.
+    QHostAddress parsed;
+    if (!parsed.setAddress(forwarded)) {
+        return peerKey;
+    }
+    return parsed.toString();
+}
+
 void OpenKJEmbeddedApi::sendErrorAndClose(QTcpSocket *socket, const int statusCode, const QString &message)
 {
     socket->write(jsonResponse(statusCode, QJsonObject{{"ok", false}, {"error", message}}));
@@ -268,6 +358,7 @@ void OpenKJEmbeddedApi::onSocketDisconnected()
 
     m_connections.remove(socket);
     m_sseClients.remove(socket);
+    m_sseDeltaClients.remove(socket);
     if (m_sseClients.isEmpty()) {
         m_sseRefreshTimer.stop();
         // Nothing drives evaluateUpNext() while no one is subscribed, so the set
@@ -278,7 +369,7 @@ void OpenKJEmbeddedApi::onSocketDisconnected()
     socket->deleteLater();
 }
 
-void OpenKJEmbeddedApi::beginEventStream(QTcpSocket *socket)
+void OpenKJEmbeddedApi::beginEventStream(QTcpSocket *socket, const QUrlQuery &query)
 {
     QByteArray headers;
     headers.append("HTTP/1.1 200 OK\r\n");
@@ -299,12 +390,20 @@ void OpenKJEmbeddedApi::beginEventStream(QTcpSocket *socket)
     socket->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
 
     m_sseClients.insert(socket);
+    // Opt-in rather than the default: a client that does not understand tick frames
+    // would just watch its wait times freeze between rotation changes, and the
+    // frontend is deployed separately from this server.
+    if (query.queryItemValue("deltas") == "1") {
+        m_sseDeltaClients.insert(socket);
+    }
     if (!m_sseRefreshTimer.isActive()) {
         m_sseRefreshTimer.start();
     }
 
     // Send the current state immediately so a fresh subscriber doesn't have to
-    // wait for the next rotation change to render anything.
+    // wait for the next rotation change to render anything. Always the full
+    // snapshot, deltas or not - a tick is meaningless without something to apply
+    // it to.
     writeSseFrame(socket, "queue", QJsonDocument(buildQueueResponse()).toJson(QJsonDocument::Compact));
 }
 
@@ -318,6 +417,47 @@ void OpenKJEmbeddedApi::scheduleSseBroadcast()
     }
 }
 
+QByteArray OpenKJEmbeddedApi::snapshotFingerprint(const QJsonObject &snapshot)
+{
+    QJsonObject stable = snapshot;
+    stable.insert("requests", strippedEntries(snapshot.value("requests").toArray()));
+    stable.insert("recently_played", strippedEntries(snapshot.value("recently_played").toArray()));
+
+    QJsonObject nowPlaying = snapshot.value("now_playing").toObject();
+    stripVolatileFields(nowPlaying);
+    // The running tally rides its own "cheer" event, which every subscriber already
+    // gets within 250ms of a tap. Counting it as structural would mean a full
+    // snapshot to every phone in the room for each batch of applause - the exact
+    // moment the stream can least afford it.
+    nowPlaying.remove("cheers");
+    stable.insert("now_playing", nowPlaying);
+
+    // QJsonDocument writes object keys in sorted order, so equal objects always
+    // serialise to equal bytes.
+    return QCryptographicHash::hash(QJsonDocument(stable).toJson(QJsonDocument::Compact),
+                                    QCryptographicHash::Sha1);
+}
+
+QJsonObject OpenKJEmbeddedApi::snapshotTick(const QJsonObject &snapshot)
+{
+    // Keyed by request id rather than sent as an array, because a client applying
+    // this has to find the entry it belongs to, and position in the array is not a
+    // stable way to do that.
+    QJsonObject waits;
+    const QJsonArray requests = snapshot.value("requests").toArray();
+    for (const auto &value : requests) {
+        const QJsonObject entry = value.toObject();
+        waits.insert(QString::number(entry.value("request_id").toInt()),
+                     entry.value("wait_seconds").toInt());
+    }
+
+    return QJsonObject{
+        {"serial", snapshot.value("serial")},
+        {"waits", waits},
+        {"cheers", snapshot.value("now_playing").toObject().value("cheers").toInt()}
+    };
+}
+
 void OpenKJEmbeddedApi::broadcastSseSnapshot()
 {
     if (m_sseClients.isEmpty()) {
@@ -326,11 +466,31 @@ void OpenKJEmbeddedApi::broadcastSseSnapshot()
         return;
     }
 
+    const QJsonObject snapshot = buildQueueResponse();
+    const QByteArray fingerprint = snapshotFingerprint(snapshot);
+    // Anything but a countdown moving: a singer added, removed, reordered, the
+    // rotation advancing, a key change, the queue being locked. Those need the whole
+    // picture, because a delta has no way to describe them.
+    const bool structural = fingerprint != m_lastSnapshotFingerprint;
+    m_lastSnapshotFingerprint = fingerprint;
+
+    const QByteArray tick = QJsonDocument(snapshotTick(snapshot)).toJson(QJsonDocument::Compact);
+    const bool tickChanged = tick != m_lastTick;
+    m_lastTick = tick;
+
     ++m_sseEventId;
-    const QByteArray data = QJsonDocument(buildQueueResponse()).toJson(QJsonDocument::Compact);
+    const QByteArray full = QJsonDocument(snapshot).toJson(QJsonDocument::Compact);
     const auto clients = m_sseClients;
     for (QTcpSocket *socket : clients) {
-        writeSseFrame(socket, "queue", data);
+        if (structural || !m_sseDeltaClients.contains(socket)) {
+            writeSseFrame(socket, "queue", full);
+        } else if (tickChanged) {
+            writeSseFrame(socket, "tick", tick);
+        } else {
+            // Nothing has moved at all - an idle rotation, or a show that has not
+            // started. Between shows this is the whole 20 s tick, every tick.
+            writeSseKeepalive(socket);
+        }
     }
 
     evaluateUpNext();
@@ -419,18 +579,42 @@ void OpenKJEmbeddedApi::evaluateUpNext()
     }
 }
 
-void OpenKJEmbeddedApi::writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data)
+bool OpenKJEmbeddedApi::sseSocketWritable(QTcpSocket *socket)
 {
     if (socket->state() != QAbstractSocket::ConnectedState) {
         m_sseClients.remove(socket);
-        return;
+        m_sseDeltaClients.remove(socket);
+        return false;
     }
 
     // A client that stopped reading would otherwise let the write buffer grow
     // without bound; cut it loose and let EventSource reconnect.
     if (socket->bytesToWrite() > 1024 * 1024) {
         m_sseClients.remove(socket);
+        m_sseDeltaClients.remove(socket);
         socket->abort();
+        return false;
+    }
+
+    return true;
+}
+
+void OpenKJEmbeddedApi::writeSseKeepalive(QTcpSocket *socket)
+{
+    if (!sseSocketWritable(socket)) {
+        return;
+    }
+
+    // No id and no event name: a line beginning with a colon is a comment, which
+    // EventSource drops without waking the page. It exists purely so the bytes keep
+    // flowing.
+    socket->write(": keepalive\n\n");
+    socket->flush();
+}
+
+void OpenKJEmbeddedApi::writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data)
+{
+    if (!sseSocketWritable(socket)) {
         return;
     }
 
@@ -931,7 +1115,6 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     query.bindValue(":nowSinger", nowSingerId);
 
     QJsonArray requests;
-    QJsonArray upNext;
     if (query.exec()) {
         while (query.next()) {
             const int singerPosition = query.value(8).toInt();
@@ -948,7 +1131,6 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             request.insert("wait_seconds", m_rotationModel.positionWaitTime(singerPosition));
             request.insert("request_time", QDateTime::currentSecsSinceEpoch());
             requests.append(request);
-            upNext.append(request);
         }
     }
 
@@ -983,7 +1165,6 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
                 request.insert("wait_seconds", 0);
                 request.insert("request_time", QDateTime::currentSecsSinceEpoch());
                 requests.append(request);
-                upNext.append(request);
             }
         }
     }
@@ -1019,7 +1200,9 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     out.insert("serial", m_settings.embeddedApiSerial());
     out.insert("requests", requests);
     out.insert("now_playing", nowPlaying);
-    out.insert("up_next", upNext);
+    // No "up_next": it was a byte-for-byte copy of "requests", doubling the largest
+    // part of every snapshot for nothing. "requests" is already in rotation order,
+    // so the head of it is what up next ever meant.
     out.insert("recently_played", recentlyPlayed);
     return out;
 }
@@ -1520,6 +1703,14 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"supportsSelfSkip", true},
         {"supportsEventStream", true},
         {"eventStreamPath", "/local/events"},
+        // Append ?deltas=1 to the stream path to get "tick" frames - {serial, waits,
+        // cheers}, waits keyed by request_id - in place of a full snapshot on the
+        // ticks where only the countdowns moved. Apply them over the last "queue"
+        // frame. Without the parameter every tick carries the whole snapshot, which
+        // is what a client that ignores this keeps getting.
+        {"supportsQueueDeltas", true},
+        {"queueDeltaQueryParam", "deltas"},
+        {"queueDeltaEventName", "tick"},
         {"supportsUpNextEvents", true},
         {"upNextEventName", "upnext"},
         // 0 when the KJ has turned the alerts off, so a client can hide the

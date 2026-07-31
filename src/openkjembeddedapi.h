@@ -2,6 +2,7 @@
 #define OPENKJEMBEDDEDAPI_H
 
 #include <QObject>
+#include <QHostAddress>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QHash>
@@ -120,10 +121,19 @@ private:
     // Sockets parked on GET /local/events. They never get a Content-Length or a
     // close - we hold them open and push snapshots until the client goes away.
     QSet<QTcpSocket *> m_sseClients;
+    // The subset that asked for delta frames with ?deltas=1. A client not in here
+    // keeps getting a full snapshot on every tick, which is what the wire looked
+    // like before deltas existed.
+    QSet<QTcpSocket *> m_sseDeltaClients;
     QTimer m_sseBroadcastTimer;
     QTimer m_sseRefreshTimer;
     QTimer m_idleSweepTimer;
     quint64 m_sseEventId{0};
+    // Hash of the last snapshot with its countdowns and timestamps removed, so a
+    // broadcast can tell "the show moved" from "twenty seconds passed".
+    QByteArray m_lastSnapshotFingerprint;
+    // Last delta frame built, to recognise a tick that would say nothing at all.
+    QByteArray m_lastTick;
 
     // Singers already told they are coming up, so a redraw, a keepalive tick, or a
     // phone reconnecting does not ping the same person twice. A name leaves the set
@@ -131,7 +141,8 @@ private:
     // re-arms them for their next turn around the rotation.
     QSet<QString> m_upNextNotified;
 
-    // Peer address of the request currently being handled. The handlers are plain
+    // Address of the client currently being served - the socket peer, or the address
+    // it was forwarded from when the peer is a trusted proxy. The handlers are plain
     // JSON-in/JSON-out functions with no socket access, and only the auth ones care
     // who is calling; stashing it here beats threading it through every signature.
     // Safe because handling is synchronous and single-threaded.
@@ -158,15 +169,35 @@ private:
     void onSocketDisconnected();
     void sweepIdleConnections();
 
-    void beginEventStream(QTcpSocket *socket);
+    void beginEventStream(QTcpSocket *socket, const QUrlQuery &query);
     void scheduleSseBroadcast();
     void broadcastSseSnapshot();
+    // Hash of everything in a snapshot except the values that move on their own.
+    // Two snapshots with the same fingerprint describe the same show.
+    static QByteArray snapshotFingerprint(const QJsonObject &snapshot);
+    // The countdowns alone, keyed by request id, for when that is all that changed.
+    // A few hundred bytes against the tens of kilobytes of a full snapshot, which
+    // matters once the stream is crossing a tunnel rather than the room's wifi.
+    static QJsonObject snapshotTick(const QJsonObject &snapshot);
     // Finds singers who have just come within the KJ's alert window and pushes one
     // "upnext" frame for each. Runs off the back of every snapshot broadcast.
     void evaluateUpNext();
     void writeSseFrame(QTcpSocket *socket, const QByteArray &eventName, const QByteArray &data);
+    // A bare comment, which EventSource discards. Sent in place of a frame when a
+    // tick would carry no news, so the connection still sees traffic - an idle
+    // stream is exactly what a tunnel or proxy eventually reaps.
+    void writeSseKeepalive(QTcpSocket *socket);
+    // Drops a stream that has closed or stopped reading. False means the caller
+    // must not write: the socket is already out of the client sets.
+    bool sseSocketWritable(QTcpSocket *socket);
 
     void sendErrorAndClose(QTcpSocket *socket, int statusCode, const QString &message);
+    // What the rate limiters key on. Behind a proxy every request arrives from the
+    // proxy's own address, which would collapse the whole room into one bucket, so a
+    // forwarded client address is preferred - but only from a hop we trust, since
+    // otherwise it is just a header the client picked.
+    QString clientKeyForRequest(QTcpSocket *socket, const HttpRequest &request);
+    bool isTrustedProxy(const QHostAddress &peer);
     // Rejects further login attempts from m_currentClientKey once it has failed too
     // many times in a row. Applies to the shared admin password as much as to singer
     // accounts - the admin password is the more valuable of the two to guess.
