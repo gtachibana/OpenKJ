@@ -2,10 +2,15 @@
 #include "ui_dlgnamecleanup.h"
 
 #include <QApplication>
+#include <QFileDialog>
+#include <QFont>
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QTableWidgetItem>
+
+#include "settings.h"
 
 namespace {
 
@@ -35,6 +40,8 @@ DlgNameCleanup::DlgNameCleanup(QWidget *parent) :
     ui->tableWidget->verticalHeader()->setVisible(false);
     ui->tableWidget->setSortingEnabled(true);
     connect(ui->tableWidget, &QTableWidget::itemChanged, this, &DlgNameCleanup::onItemChanged);
+    Settings settings;
+    ui->lineEditReviewDir->setText(settings.libraryReviewDir());
     connect(&m_cleaner, &LibraryNameCleaner::stateChanged, this, [this](const QString &state) {
         ui->lblSummary->setText(state);
     });
@@ -46,6 +53,9 @@ DlgNameCleanup::~DlgNameCleanup() {
 }
 
 void DlgNameCleanup::analyze() {
+    // A fresh scan groups the library from scratch, so overrides keyed on the
+    // old grouping mean nothing against it.
+    m_retargets.clear();
     QApplication::setOverrideCursor(Qt::WaitCursor);
     m_plan = m_cleaner.plan();
     QApplication::restoreOverrideCursor();
@@ -69,7 +79,7 @@ void DlgNameCleanup::populateTable() {
         const auto &proposal = m_plan.proposals[row];
 
         auto *fieldItem = new QTableWidgetItem(fieldText(proposal.field));
-        fieldItem->setFlags(fieldItem->flags() | Qt::ItemIsUserCheckable);
+        fieldItem->setFlags((fieldItem->flags() | Qt::ItemIsUserCheckable) & ~Qt::ItemIsEditable);
         // Only the safe bets start ticked. Everything else is a judgement call
         // and should be looked at before it is applied.
         fieldItem->setCheckState(
@@ -79,21 +89,40 @@ void DlgNameCleanup::populateTable() {
         fieldItem->setData(Qt::UserRole, row);
         ui->tableWidget->setItem(row, COL_FIELD, fieldItem);
 
-        ui->tableWidget->setItem(row, COL_ARTIST, new QTableWidgetItem(proposal.scopeArtist));
-        ui->tableWidget->setItem(row, COL_CURRENT, new QTableWidgetItem(proposal.oldValue));
-        ui->tableWidget->setItem(row, COL_PROPOSED, new QTableWidgetItem(proposal.newValue));
+        // Everything but the winning spelling is a statement of what the library
+        // holds, so only that one column is worth typing into.
+        const auto readOnly = [](QTableWidgetItem *item) {
+            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+            return item;
+        };
+        ui->tableWidget->setItem(row, COL_ARTIST, readOnly(new QTableWidgetItem(proposal.scopeArtist)));
+        ui->tableWidget->setItem(row, COL_CURRENT, readOnly(new QTableWidgetItem(proposal.oldValue)));
+
+        const QString target = targetValue(proposal);
+        auto *proposedItem = new QTableWidgetItem(target);
+        proposedItem->setToolTip(tr("Type a different spelling to make it the winner for this whole group, "
+                                    "including \"%1\".").arg(proposal.newValue));
+        if (target != proposal.newValue) {
+            // An overruled winner is worth spotting at a glance - it is the one
+            // thing on screen the analysis did not choose.
+            QFont font = proposedItem->font();
+            font.setBold(true);
+            proposedItem->setFont(font);
+        }
+        ui->tableWidget->setItem(row, COL_PROPOSED, proposedItem);
 
         auto *songsItem = new QTableWidgetItem;
         songsItem->setData(Qt::DisplayRole, proposal.songs);
         songsItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        songsItem->setToolTip(tr("%1 song(s) use this spelling, %2 already use the proposed one.")
-                                      .arg(proposal.songs)
-                                      .arg(proposal.keptSongs));
-        ui->tableWidget->setItem(row, COL_SONGS, songsItem);
+        songsItem->setToolTip(tr("%1 song(s) use this spelling, %2 already use \"%3\".")
+                                      .arg(QString::number(proposal.songs), QString::number(proposal.keptSongs),
+                                           proposal.newValue));
+        ui->tableWidget->setItem(row, COL_SONGS, readOnly(songsItem));
 
-        ui->tableWidget->setItem(row, COL_CONFIDENCE, new QTableWidgetItem(confidenceText(proposal.confidence)));
+        ui->tableWidget->setItem(row, COL_CONFIDENCE,
+                                 readOnly(new QTableWidgetItem(confidenceText(proposal.confidence))));
         ui->tableWidget->setItem(row, COL_REASON,
-                                 new QTableWidgetItem(LibraryNameCleaner::reasonText(proposal.reason)));
+                                 readOnly(new QTableWidgetItem(LibraryNameCleaner::reasonText(proposal.reason))));
     }
 
     ui->tableWidget->setSortingEnabled(true);
@@ -128,14 +157,69 @@ void DlgNameCleanup::applyFilter() {
     }
 }
 
+QString DlgNameCleanup::clusterKey(const LibraryNameCleaner::Proposal &proposal) {
+    // A separator no artist or title can hold, so two different groups cannot
+    // collide by concatenation.
+    static const QChar sep(u'\x1f');
+    return QString::number(static_cast<int>(proposal.field)) + sep + proposal.scopeArtist + sep
+           + proposal.newValue;
+}
+
+QString DlgNameCleanup::targetValue(const LibraryNameCleaner::Proposal &proposal) const {
+    return m_retargets.value(clusterKey(proposal), proposal.newValue);
+}
+
 std::vector<LibraryNameCleaner::Proposal> DlgNameCleanup::checkedProposals() const {
     std::vector<LibraryNameCleaner::Proposal> checked;
+    // Groups whose winner has been overruled, and one pristine proposal from
+    // each so the old winner can be described afterwards.
+    QHash<QString, LibraryNameCleaner::Proposal> overruled;
+
     for (int row = 0; row < ui->tableWidget->rowCount(); row++) {
         const auto *item = ui->tableWidget->item(row, COL_FIELD);
         if (item == nullptr || item->checkState() != Qt::Checked)
             continue;
-        checked.push_back(m_plan.proposals[item->data(Qt::UserRole).toInt()]);
+
+        const auto &pristine = m_plan.proposals[item->data(Qt::UserRole).toInt()];
+        const QString key = clusterKey(pristine);
+        const QString target = targetValue(pristine);
+        if (target != pristine.newValue) {
+            // Any row of the group names the old winner, but they can disagree
+            // on how many songs already spell it that way - a misspelling row
+            // counts a whole cluster where a variant row counts one spelling.
+            // The larger figure is the one describing the group.
+            const auto existing = overruled.constFind(key);
+            if (existing == overruled.constEnd() || pristine.keptSongs > existing->keptSongs)
+                overruled.insert(key, pristine);
+        }
+
+        // A row whose spelling is the one that was picked has nothing left to
+        // do - it is already right.
+        if (target == pristine.oldValue)
+            continue;
+
+        LibraryNameCleaner::Proposal proposal = pristine;
+        proposal.newValue = target;
+        checked.push_back(proposal);
     }
+
+    // The spelling the group used to agree on is now just another variant, so it
+    // needs a row of its own. Without this the majority keeps the old name and
+    // picking a different winner would move only the rare spellings onto it.
+    for (auto it = overruled.constBegin(); it != overruled.constEnd(); ++it) {
+        const LibraryNameCleaner::Proposal &pristine = it.value();
+        LibraryNameCleaner::Proposal formerWinner = pristine;
+        formerWinner.oldValue = pristine.newValue;
+        formerWinner.newValue = m_retargets.value(it.key());
+        formerWinner.songs = pristine.keptSongs;
+        formerWinner.keptSongs = 0;
+        // Not a typo the library disagreed about - a choice that was made here.
+        formerWinner.reason = LibraryNameCleaner::Reason::Variant;
+        formerWinner.confidence = LibraryNameCleaner::Confidence::High;
+        if (formerWinner.oldValue != formerWinner.newValue)
+            checked.push_back(formerWinner);
+    }
+
     return checked;
 }
 
@@ -170,10 +254,70 @@ void DlgNameCleanup::updateSummary() {
     ui->btnApply->setEnabled(!checked.empty());
 }
 
-void DlgNameCleanup::onItemChanged() {
-    if (m_populating)
+void DlgNameCleanup::onItemChanged(QTableWidgetItem *item) {
+    if (m_populating || item == nullptr)
         return;
+    if (item->column() != COL_PROPOSED) {
+        updateSummary();
+        return;
+    }
+
+    const auto *fieldItem = ui->tableWidget->item(item->row(), COL_FIELD);
+    if (fieldItem == nullptr)
+        return;
+    const auto &pristine = m_plan.proposals[fieldItem->data(Qt::UserRole).toInt()];
+
+    const QString typed = item->text().trimmed();
+    if (typed.isEmpty() || typed == targetValue(pristine)) {
+        // Nothing was really changed, but the cell may now hold stray spaces.
+        m_populating = true;
+        item->setText(targetValue(pristine));
+        m_populating = false;
+        return;
+    }
+
+    if (typed == pristine.newValue)
+        m_retargets.remove(clusterKey(pristine));
+    else
+        m_retargets.insert(clusterKey(pristine), typed);
+
+    // Every other row aiming at the same spelling has just changed too, so the
+    // table is rebuilt rather than the one cell patched. Rebuilding would reset
+    // the ticks to what the analysis suggested, so they are carried over - and
+    // the group that was just given a winner is ticked outright, since choosing
+    // one is only meaningful if it gets applied.
+    const QString editedKey = clusterKey(pristine);
+    QHash<int, bool> ticked;
+    for (int row = 0; row < ui->tableWidget->rowCount(); row++) {
+        const auto *field = ui->tableWidget->item(row, COL_FIELD);
+        if (field == nullptr)
+            continue;
+        const int index = field->data(Qt::UserRole).toInt();
+        ticked.insert(index, field->checkState() == Qt::Checked
+                                     || clusterKey(m_plan.proposals[index]) == editedKey);
+    }
+
+    const int scrollPosition = ui->tableWidget->verticalScrollBar()->value();
+    populateTable();
+    m_populating = true;
+    for (int row = 0; row < ui->tableWidget->rowCount(); row++) {
+        auto *field = ui->tableWidget->item(row, COL_FIELD);
+        if (field == nullptr)
+            continue;
+        field->setCheckState(ticked.value(field->data(Qt::UserRole).toInt(), false) ? Qt::Checked
+                                                                                   : Qt::Unchecked);
+    }
+    m_populating = false;
+    applyFilter();
+    ui->tableWidget->verticalScrollBar()->setValue(scrollPosition);
     updateSummary();
+}
+
+void DlgNameCleanup::on_btnBrowseReviewDir_clicked() {
+    const QString chosen = QFileDialog::getExistingDirectory(this, tr("Folder for duplicates needing review"),
+                                                             ui->lineEditReviewDir->text());
+    if (!chosen.isEmpty())
+        ui->lineEditReviewDir->setText(chosen);
 }
 
 void DlgNameCleanup::on_cbxFilter_currentIndexChanged(int index) {
@@ -214,6 +358,10 @@ void DlgNameCleanup::on_btnApply_clicked() {
 
     LibraryNameCleaner::RenamePlan renames;
     if (ui->cbxRenameFiles->isChecked()) {
+        // Saved before planning, because working out where a duplicate would go
+        // is part of the plan the confirmation describes.
+        Settings settings;
+        settings.setLibraryReviewDir(ui->lineEditReviewDir->text().trimmed());
         QApplication::setOverrideCursor(Qt::WaitCursor);
         renames = m_cleaner.planRenames(checked);
         QApplication::restoreOverrideCursor();
@@ -237,6 +385,31 @@ void DlgNameCleanup::on_btnApply_clicked() {
                      "database rebuild. Nothing is deleted, and every rename is written to a CSV in the "
                      "OpenKJ data folder.\n\n")
                           .arg(renames.renames.size());
+
+        const int recycled = renames.countOf(LibraryMerger::Disposal::Recycled);
+        const int setAside = renames.countOf(LibraryMerger::Disposal::SetAside);
+        if (recycled > 0 || setAside > 0) {
+            detail += tr("%1 songs turn out to be duplicates - their corrected name is one another file "
+                         "already has - and will be merged into the copy that holds it. Queue entries, "
+                         "history and favourites follow the copy that is kept.\n\n")
+                              .arg(renames.merges.size());
+            if (recycled > 0) {
+                detail += tr("%1 of them are the same recording byte for byte, so the spare goes to the "
+                             "Recycle Bin. Where the two audio files differ in size the bigger one is "
+                             "kept.\n\n")
+                                  .arg(recycled);
+            }
+            if (setAside > 0) {
+                detail += tr("%1 share a name but not their graphics, so they are different recordings. "
+                             "Nothing of theirs is binned - the spare set is moved to %2 for you to look "
+                             "at later.\n\n")
+                                  .arg(QString::number(setAside),
+                                       ui->lineEditReviewDir->text().trimmed().isEmpty()
+                                               ? tr("a folder beside each source directory")
+                                               : ui->lineEditReviewDir->text().trimmed());
+            }
+        }
+
         if (!renames.keptAsIs.isEmpty()) {
             detail += tr("%1 songs keep the filenames they have - see the details. They are still "
                          "corrected in OpenKJ; only a rebuild would lose them.\n\n")
@@ -247,13 +420,21 @@ void DlgNameCleanup::on_btnApply_clicked() {
     }
     confirm.setInformativeText(detail);
 
-    if (!renames.keptAsIs.isEmpty()) {
+    if (!renames.keptAsIs.isEmpty() || !renames.merges.empty()) {
         QStringList details;
-        // Counts first, so the question of whether any of this matters can be
-        // answered without reading a few hundred lines.
-        for (auto it = renames.keptAsIsByCause.constBegin(); it != renames.keptAsIsByCause.constEnd(); ++it)
-            details << QString("%1: %2").arg(QString::number(it.value()), it.key());
-        details << "" << tr("Song by song:") << renames.keptAsIs;
+        if (!renames.merges.empty()) {
+            details << tr("Duplicates to be merged:");
+            for (const auto &conflict : renames.merges)
+                details << LibraryMerger::describe(conflict);
+            details << "";
+        }
+        if (!renames.keptAsIs.isEmpty()) {
+            // Counts first, so the question of whether any of this matters can
+            // be answered without reading a few hundred lines.
+            for (auto it = renames.keptAsIsByCause.constBegin(); it != renames.keptAsIsByCause.constEnd(); ++it)
+                details << QString("%1: %2").arg(QString::number(it.value()), it.key());
+            details << "" << tr("Song by song:") << renames.keptAsIs;
+        }
         confirm.setDetailedText(details.join("\n"));
     }
 

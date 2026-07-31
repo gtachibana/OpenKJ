@@ -74,6 +74,21 @@ class MainWindow : public QMainWindow {
 Q_OBJECT
 
 private:
+    // What became of an edit whose corrected filename was already taken. Kept
+    // out of the slots section below so moc does not take the helper returning
+    // it for a slot.
+    enum class ConflictOutcome {
+        Cancelled,      // nothing was changed; the edit should stop
+        NameFreed,      // what held the name was an unimported file and has gone; carry on renaming
+        SongWasMerged   // this song was folded into the copy holding the name; its row no longer exists
+    };
+
+    // Settles a rename that would land on a name another set of files already
+    // holds, by collapsing the duplicate pair into one. Asks first, since it
+    // moves files the KJ did not name.
+    ConflictOutcome resolveRenameConflict(const std::shared_ptr<okj::KaraokeSong> &song,
+                                          const QString &occupiedPath);
+
     Settings m_settings;
     std::unique_ptr<Ui::MainWindow> ui;
     std::string m_loggingPrefix{"[MainWindow]"};

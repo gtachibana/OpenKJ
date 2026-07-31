@@ -178,6 +178,19 @@ QString Settings::logDir()
     return settings->value("logDir", QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + QDir::separator() + "OpenKJ_Logs" + QDir::separator()).toString();
 }
 
+QString Settings::libraryReviewDir()
+{
+    // No default. An empty value means the folder is worked out per song so it
+    // lands on the same volume as the library, which a fixed default could not
+    // promise - see LibraryMerger::resolveReviewDir.
+    return settings->value("libraryReviewDir", QString()).toString();
+}
+
+void Settings::setLibraryReviewDir(QString path)
+{
+    settings->setValue("libraryReviewDir", path);
+}
+
 bool Settings::logShow()
 {
     return settings->value("logVisible", false).toBool();

@@ -17,7 +17,7 @@
    <item>
     <widget class="QLabel" name="lblIntro">
      <property name="text">
-      <string>Names that look like variants of each other, judged against the rest of your library. Ticked rows are the safe bets; review the rest before applying. Nothing changes until you press Apply.</string>
+      <string>Names that look like variants of each other, judged against the rest of your library. Ticked rows are the safe bets; review the rest before applying. Double-click a Proposed cell to pick a different winner - every spelling in that group, including the one it currently agrees on, is renamed to what you type. Nothing changes until you press Apply.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>
@@ -101,7 +101,7 @@
       <enum>QAbstractItemView::SelectRows</enum>
      </property>
      <property name="editTriggers">
-      <set>QAbstractItemView::NoEditTriggers</set>
+      <set>QAbstractItemView::DoubleClicked|QAbstractItemView::EditKeyPressed</set>
      </property>
      <property name="sortingEnabled">
       <bool>true</bool>
@@ -152,6 +152,34 @@
       <bool>true</bool>
      </property>
     </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayoutReview">
+     <item>
+      <widget class="QLabel" name="lblReviewDir">
+       <property name="text">
+        <string>Review folder:</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="lineEditReviewDir">
+       <property name="toolTip">
+        <string>Where a duplicate set of files is put when it is not safe to bin it - the two share a name but their graphics differ, so they are different recordings. Leave empty to use a folder beside each source directory, which keeps the move on the same drive.</string>
+       </property>
+       <property name="placeholderText">
+        <string>(beside each source directory)</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnBrowseReviewDir">
+       <property name="text">
+        <string>Browse...</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
    </item>
    <item>
     <layout class="QHBoxLayout" name="horizontalLayoutButtons">

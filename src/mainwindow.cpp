@@ -32,6 +32,7 @@
 #include "mzarchive.h"
 #include "tagreader.h"
 #include "dlgeditsong.h"
+#include "librarymerger.h"
 #include "soundfxbutton.h"
 #include "src/models/tableviewtooltipfilter.h"
 #include "dbupdater.h"
@@ -2670,6 +2671,70 @@ void MainWindow::previewKaraokeSong(const QString &path) {
     videoPreview->show();
 }
 
+MainWindow::ConflictOutcome MainWindow::resolveRenameConflict(const std::shared_ptr<okj::KaraokeSong> &song,
+                                                              const QString &occupiedPath) {
+    const QString occupantName = QFileInfo(occupiedPath).fileName();
+    LibraryMerger merger(m_logger);
+    LibraryMerger::Conflict conflict;
+    QString error;
+    if (!merger.inspect(song->id, song->path, occupiedPath, conflict, error)) {
+        QMessageBox::warning(this, "Unable to rename file",
+                             "A file called \"" + occupantName + "\" is already in that folder, and the two "
+                             "could not be compared (" + error + "). Operation cancelled.");
+        return ConflictOutcome::Cancelled;
+    }
+
+    const QString reviewDir = LibraryMerger::resolveReviewDir(conflict.loserMain);
+    QMessageBox confirm(this);
+    confirm.setIcon(QMessageBox::Question);
+    confirm.setText("\"" + occupantName + "\" is already in that folder.");
+
+    QString detail;
+    if (conflict.disposal == LibraryMerger::Disposal::Recycled) {
+        detail = "Its graphics are identical to this song's, so the two are the same track. Keeping "
+                 "\"" + QFileInfo(conflict.winnerMain).fileName() + "\" and sending the spare to the Recycle "
+                 "Bin.";
+        if (conflict.promoteLoserAudio)
+            detail += " The bigger of the two audio files is the one kept.";
+    } else {
+        detail = "The two share a name but their graphics differ, so they are different recordings. Nothing "
+                 "will be deleted - \"" + QFileInfo(conflict.loserMain).fileName() + "\" and its audio are "
+                 "moved to:\n\n" + reviewDir + "\n\nfor you to look at later.";
+    }
+    if (!conflict.losingAnOrphan()) {
+        detail += "\n\nThis song's library entry is folded into the copy that is kept; queue entries, history "
+                  "and favourites follow it.";
+    } else {
+        detail += "\n\nNothing has imported that file, so your song keeps its entry and gets the name.";
+    }
+    confirm.setInformativeText(detail);
+    confirm.addButton(QMessageBox::Cancel);
+    auto *mergeButton = confirm.addButton("Merge", QMessageBox::AcceptRole);
+    confirm.exec();
+    if (confirm.clickedButton() != mergeButton)
+        return ConflictOutcome::Cancelled;
+
+    // Same split the bulk cleanup uses: the row inside a transaction that can be
+    // taken back, the files only once that has landed - the Recycle Bin does not
+    // hand anything back on request.
+    QSqlQuery transaction;
+    transaction.exec("BEGIN TRANSACTION");
+    if (!merger.foldRow(conflict, error) || !transaction.exec("COMMIT")) {
+        transaction.exec("ROLLBACK");
+        QMessageBox::warning(this, "Unable to merge",
+                             "The two could not be merged (" + error + "). Nothing was changed.");
+        return ConflictOutcome::Cancelled;
+    }
+    if (!merger.disposeFiles(conflict, reviewDir, error)) {
+        QMessageBox::warning(this, "Merged, but the spare files are still there",
+                             "The library entries were merged, but the spare files could not be moved (" + error
+                                     + "). They are still on disk and will be imported again on the next "
+                                       "library scan.");
+    }
+
+    return conflict.losingAnOrphan() ? ConflictOutcome::NameFreed : ConflictOutcome::SongWasMerged;
+}
+
 void MainWindow::editSong(const std::shared_ptr<okj::KaraokeSong>& song) {
     QSqlQuery query;
     bool isCdg = false;
@@ -2785,30 +2850,56 @@ void MainWindow::editSong(const std::shared_ptr<okj::KaraokeSong>& song) {
             msgBoxErr.exec();
             return;
         }
-        if (QFile::exists(newFn)) {
-            QMessageBox msgBoxErr;
-            msgBoxErr.setText("Unable to rename file");
-            msgBoxErr.setInformativeText(
-                    "Unable to rename file, a file by that name already exists in the same directory. Operation cancelled.");
-            msgBoxErr.setStandardButtons(QMessageBox::Ok);
-            msgBoxErr.exec();
-            return;
-        }
-        if (isCdg) {
-            if (QFile::exists(newMediaFn)) {
+        // These used to be tested as bare filenames, which asks the working
+        // directory rather than the song's folder - so a real collision sailed
+        // past and turned into "an unknown error occurred" when the rename
+        // failed. Both are absolute now.
+        const QDir songDir = QFileInfo(song->path).absoluteDir();
+        const QString newFilePath = songDir.absoluteFilePath(newFn);
+        const QString newMediaPath = isCdg ? songDir.absoluteFilePath(newMediaFn) : QString();
+
+        if (newFilePath != song->path) {
+            // Fixing nothing but the capitalisation leaves the file looking like
+            // it is standing in its own way, since Windows does not tell the two
+            // names apart. Only the filesystem can separate that from a genuine
+            // duplicate, which is what the two spellings would be on a
+            // case-sensitive filesystem. QFile::rename copes with the case
+            // change itself from there.
+            const bool renamingOntoItself = LibraryMerger::sameFileOnDisk(newFilePath, song->path);
+
+            if (!renamingOntoItself && QFile::exists(newFilePath)) {
+                switch (resolveRenameConflict(song, newFilePath)) {
+                    case ConflictOutcome::Cancelled:
+                        return;
+                    case ConflictOutcome::SongWasMerged:
+                        // This song's row has been folded into the copy already
+                        // holding the name, so there is nothing left to rename
+                        // and nothing left to update.
+                        m_karaokeSongsModel.loadData();
+                        return;
+                    case ConflictOutcome::NameFreed:
+                        break;
+                }
+            }
+            // A stray audio file on the wanted name with no CDG beside it is not
+            // a duplicate song, so there is no pair to merge - just something in
+            // the way. The companion follows the main file into a case-only
+            // rename, where what is "in the way" is itself.
+            const bool audioOntoItself = LibraryMerger::sameFileOnDisk(newMediaPath, mediaFile);
+            if (isCdg && !mediaFile.isEmpty() && newMediaPath != mediaFile && !audioOntoItself
+                && QFile::exists(newMediaPath)) {
                 QMessageBox msgBoxErr;
                 msgBoxErr.setText("Unable to rename file");
                 msgBoxErr.setInformativeText(
-                        "Unable to rename file, a file by that name already exists in the same directory. Operation cancelled.");
+                        "An audio file called \"" + newMediaFn + "\" is already in that folder and is not part "
+                        "of a karaoke track OpenKJ knows about. Move it out of the way and try again. "
+                        "Operation cancelled.");
                 msgBoxErr.setStandardButtons(QMessageBox::Ok);
                 msgBoxErr.exec();
                 return;
             }
-        }
-        QString newFilePath = QFileInfo(song->path).absoluteDir().absolutePath() + "/" + newFn;
-        if (newFilePath != song->path) {
-            if (!QFile::rename(song->path,
-                               QFileInfo(song->path).absoluteDir().absolutePath() + "/" + newFn)) {
+
+            if (!QFile::rename(song->path, newFilePath)) {
                 QMessageBox msgBoxErr;
                 msgBoxErr.setText("Error while renaming file!");
                 msgBoxErr.setInformativeText("An unknown error occurred while renaming the file. Operation cancelled.");
@@ -2816,13 +2907,14 @@ void MainWindow::editSong(const std::shared_ptr<okj::KaraokeSong>& song) {
                 msgBoxErr.exec();
                 return;
             }
-            if (isCdg) {
-                if (!QFile::rename(mediaFile,
-                                   QFileInfo(song->path).absoluteDir().absolutePath() + "/" + newMediaFn)) {
+            if (isCdg && !mediaFile.isEmpty()) {
+                if (!QFile::rename(mediaFile, newMediaPath)) {
+                    // Never leave a CDG parted from its audio.
+                    QFile::rename(newFilePath, song->path);
                     QMessageBox msgBoxErr;
                     msgBoxErr.setText("Error while renaming file!");
                     msgBoxErr.setInformativeText(
-                            "An unknown error occurred while renaming the file. Operation cancelled.");
+                            "An unknown error occurred while renaming the audio file. Operation cancelled.");
                     msgBoxErr.setStandardButtons(QMessageBox::Ok);
                     msgBoxErr.exec();
                     return;
@@ -2836,14 +2928,16 @@ void MainWindow::editSong(const std::shared_ptr<okj::KaraokeSong>& song) {
         QString newArtist = dlg.artist().trimmed();
         QString newTitle = dlg.title().trimmed();
         QString newSongId = dlg.songId();
-        QString newPath = QFileInfo(song->path).absoluteDir().absolutePath() + "/" + newFn;
+        QString newPath = newFilePath;
         QString newSearchString =
                 QFileInfo(newPath).completeBaseName() + " " + newArtist + " " + newTitle + " " + newSongId;
         query.bindValue(":artist", newArtist);
         query.bindValue(":title", newTitle);
         query.bindValue(":songid", newSongId);
         query.bindValue(":path", newPath);
-        query.bindValue(":filename", newFn);
+        // DbUpdater stores the basename with its extension stripped, so matching
+        // it keeps an edited row identical to one a fresh import would produce.
+        query.bindValue(":filename", QFileInfo(newPath).completeBaseName());
         query.bindValue(":searchstring", newSearchString);
         query.bindValue(":rowid", song->id);
         query.exec();
@@ -2856,6 +2950,21 @@ void MainWindow::editSong(const std::shared_ptr<okj::KaraokeSong>& song) {
             msgBoxErr.exec();
             return;
         } else {
+            // dbSongs is the anchor, but queueSongs denormalizes the path at
+            // insert and both history tables key their own lookups on it. Miss
+            // any of them and the rows quietly orphan - the same set the bulk
+            // name cleanup repoints in LibraryNameCleaner::repointSong.
+            for (const auto &statement : {"UPDATE queuesongs SET path = :new WHERE path = :old",
+                                          "UPDATE dbSongHistory SET filepath = :new WHERE filepath = :old",
+                                          "UPDATE historySongs SET filepath = :new WHERE filepath = :old"}) {
+                QSqlQuery repoint;
+                repoint.prepare(statement);
+                repoint.bindValue(":new", newPath);
+                repoint.bindValue(":old", song->path);
+                if (!repoint.exec())
+                    m_logger->error("{} Could not repoint {}: {}", m_loggingPrefix, statement,
+                                    repoint.lastError().text().toStdString());
+            }
             QMessageBox msgBoxInfo;
             msgBoxInfo.setText("Edit successful");
             msgBoxInfo.setInformativeText("The file has been renamed and the database has been updated successfully.");

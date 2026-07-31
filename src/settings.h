@@ -93,6 +93,10 @@ public:
     bool progressiveSearchEnabled();
     QString storeDownloadDir();
     QString logDir();
+    // Where a duplicate set of files is moved when it cannot simply be recycled
+    // - see LibraryMerger. Empty means "beside the source directory", which is
+    // resolved per song by LibraryMerger::resolveReviewDir.
+    QString libraryReviewDir();
     bool logShow();
     bool logEnabled();
     void setPassword(QString password);
@@ -415,6 +419,7 @@ public slots:
     void setLogEnabled(bool enabled);
     void setLogVisible(bool visible);
     void setLogDir(QString path);
+    void setLibraryReviewDir(QString path);
     void setCurrentRotationPosition(int position);
     void dbSetDirectoryWatchEnabled(bool val);
     void setSystemId(int id);
