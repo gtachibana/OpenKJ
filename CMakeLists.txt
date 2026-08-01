@@ -482,6 +482,7 @@ set(SOURCE_FILES
         src/runguard/runguard.cpp
         src/durationlazyupdater.cpp
         src/gainlazyupdater.cpp
+        src/youtubefetcher.cpp
         src/idledetect.cpp
         src/mainwindow.h
         src/dlgaddsong.h
@@ -551,6 +552,7 @@ set(SOURCE_FILES
         src/models/tableviewtooltipfilter.h
         src/durationlazyupdater.h
         src/gainlazyupdater.h
+        src/youtubefetcher.h
         src/idledetect.h
         src/mainwindow.ui
         src/dlgaddsong.ui
