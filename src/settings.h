@@ -322,6 +322,13 @@ public:
     void setYoutubeMaxDurationSecs(int secs);
     int youtubeMaxConcurrentFetches();
     void setYoutubeMaxConcurrentFetches(int count);
+    // Whether videos already downloaded appear in the singers' song search and
+    // browse, alongside the KJ's own library. On means the library grows itself and a
+    // cached song is instant for the next singer who wants it; off keeps the catalog
+    // strictly to what the KJ scanned in. Only ever applies to videos already on
+    // disk - one still downloading or failed is never searchable.
+    bool youtubeCachedSearchable();
+    void setYoutubeCachedSearchable(bool searchable);
     QString localUiUrl();
     void setLocalUiUrl(const QString &url);
     bool bmKCrossFade();

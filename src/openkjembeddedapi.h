@@ -297,6 +297,13 @@ private:
     // is valid before the file exists.
     int ensureYoutubeSongRow(const QString &videoId, const QString &artist, const QString &title,
                              int durationSeconds);
+    // The WHERE fragment every singer-facing catalog query shares, so the song count,
+    // browse and search can't drift apart on what a singer is allowed to find.
+    // Always excludes dropped and bad rows. Downloaded videos are included only when
+    // the KJ has allowed it and the file is actually on disk - a video still
+    // downloading or failed must never be findable, or a singer queues something the
+    // rotation will pass straight over.
+    [[nodiscard]] QString catalogFilterSql() const;
     QJsonObject removeOwnRequest(const QJsonObject &payload);
     QJsonObject moveOwnRequest(const QJsonObject &payload);
     QJsonObject setOwnAway(const QJsonObject &payload);

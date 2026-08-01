@@ -754,6 +754,16 @@ void YoutubeFetcher::dbIncrementAttempts(const QString &videoId) {
 }
 
 void YoutubeFetcher::updateSongDuration(const int songId, const QString &path) {
+    // The row is queued the moment it is created, which makes the loudness analyzer
+    // prioritize it - while the file is still downloading. It then finds nothing to
+    // read and stores the "analysis failed" sentinel, which is deliberately never
+    // retried. Clearing the column here puts the song back in front of the analyzer
+    // now that there is actually a file to measure. Harmless when the race was won.
+    QSqlQuery resetGain;
+    resetGain.prepare("UPDATE dbsongs SET gain = NULL WHERE songid = :songid");
+    resetGain.bindValue(":songid", songId);
+    resetGain.exec();
+
     TagReader reader;
     reader.taglibTags(path);
     const auto duration = static_cast<int>(reader.getDuration());

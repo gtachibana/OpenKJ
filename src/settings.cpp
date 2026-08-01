@@ -1854,6 +1854,16 @@ void Settings::setYoutubeMaxConcurrentFetches(int count)
     setScopedValue("youtubeMaxConcurrentFetches", std::clamp(count, 1, 4), LocalMode);
 }
 
+bool Settings::youtubeCachedSearchable()
+{
+    return scopedValue("youtubeCachedSearchable", true, false, LocalMode).toBool();
+}
+
+void Settings::setYoutubeCachedSearchable(bool searchable)
+{
+    setScopedValue("youtubeCachedSearchable", searchable, LocalMode);
+}
+
 void Settings::setEmbeddedApiEnabled(bool enabled)
 {
     setScopedValue("embeddedApiEnabled", enabled, LocalMode);

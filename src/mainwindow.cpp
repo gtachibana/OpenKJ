@@ -804,8 +804,13 @@ MainWindow::MainWindow(QWidget *parent) :
     // without this the show would sit idle until the KJ noticed and started it by hand.
     connect(&m_youtubeFetcher, &YoutubeFetcher::fetchFinished, this,
             [this](const QString &, int, bool ok, const QString &) {
-                if (ok)
-                    startAutoPlayIfIdle();
+                if (!ok)
+                    return;
+                // The fetcher has just cleared this song's stored gain, so put it back
+                // in front of the loudness analyzer now that there is a file to read.
+                // Downloads vary wildly in level and are the songs most in need of it.
+                prioritizeGainAnalysisForQueue();
+                startAutoPlayIfIdle();
             });
     connect(&m_embeddedApi, &OpenKJEmbeddedApi::pitchChangeRequested, this, &MainWindow::applyApiPitchChange);
     // Queued so the stop - which fades, and pumps the event loop while it does - runs
@@ -1672,8 +1677,12 @@ void MainWindow::prioritizeGainAnalysisForQueue() {
         return;
     QStringList paths;
     QSqlQuery query;
+    // Mirrors LazyGainUpdateController::seedQueue - a video still downloading has no
+    // file to analyze, and a failed analysis is never retried.
     query.exec("SELECT DISTINCT dbsongs.path FROM queueSongs, dbsongs "
-               "WHERE queueSongs.song = dbsongs.songid AND queueSongs.played = 0 AND dbsongs.gain IS NULL");
+               "WHERE queueSongs.song = dbsongs.songid AND queueSongs.played = 0 AND dbsongs.gain IS NULL "
+               "AND NOT EXISTS (SELECT 1 FROM local_youtube_fetches f "
+               "WHERE f.songid = dbsongs.songid AND f.state != 'ready')");
     while (query.next())
         paths.append(query.value(0).toString());
     m_lazyGainUpdater->prioritize(paths);

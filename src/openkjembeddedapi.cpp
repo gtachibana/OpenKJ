@@ -726,8 +726,7 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
 
     if (request.method == "GET" && cleanPath == "/stats") {
         QSqlQuery query;
-        query.exec("SELECT COUNT(1) FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
-                   "AND discid != '!!YOUTUBE!!'");
+        query.exec("SELECT COUNT(1) FROM dbsongs WHERE " + catalogFilterSql());
         int songCount = 0;
         if (query.next()) {
             songCount = query.value(0).toInt();
@@ -799,11 +798,10 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
         // migration, so dropping trim() here doesn't lose rows. Sorting on the bare
         // columns keeps the same order while letting the index supply it.
         QSqlQuery query;
-        query.prepare(QString("SELECT songid, artist, title, COALESCE(duration, 0) FROM dbsongs "
-                              "WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
-                              "AND discid != '!!YOUTUBE!!' "
+        query.prepare(QString("SELECT songid, artist, title, COALESCE(duration, 0), discid FROM dbsongs "
+                              "WHERE %3"
                               "AND %1 LIKE :prefix "
-                              "ORDER BY %1, %2 LIMIT :limit").arg(primary, secondary));
+                              "ORDER BY %1, %2 LIMIT :limit").arg(primary, secondary, catalogFilterSql()));
         query.bindValue(":prefix", letter + "%");
         query.bindValue(":limit", limit);
 
@@ -815,6 +813,11 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
                 song.insert("artist", query.value(1).toString());
                 song.insert("title", query.value(2).toString());
                 song.insert("duration_seconds", std::max(1, query.value(3).toInt() / 1000));
+                // Present only on videos, so a client that ignores it behaves exactly
+                // as before. Worth badging: these are singers' own uploads, not tracks
+                // the KJ vetted, and they sound like it.
+                if (query.value(4).toString() == kYoutubeDiscId)
+                    song.insert("source", "youtube");
                 songs.append(song);
             }
         }
@@ -999,12 +1002,8 @@ QJsonObject OpenKJEmbeddedApi::commandSearch(const QJsonObject &payload)
     QStringList terms = searchString.split(' ', Qt::SkipEmptyParts);
     QSqlQuery query;
 
-    // Cached YouTube videos stay out of the library catalog: they are a per-request
-    // side effect, not part of the KJ's curated collection, and they reach singers
-    // through YouTube search plus the "already cached" badge instead.
-    QString sql = "SELECT songid, artist, title, COALESCE(duration, 0) FROM dbsongs "
-                  "WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
-                  "AND discid != '!!YOUTUBE!!' ";
+    QString sql = "SELECT songid, artist, title, COALESCE(duration, 0), discid FROM dbsongs "
+                  "WHERE " + catalogFilterSql();
     if (!terms.isEmpty()) {
         // No lower() on the column: SQLite's LIKE is already case-insensitive for ASCII
         // (and its lower() only folds ASCII anyway), so the wrapper only cost a function
@@ -1038,6 +1037,8 @@ QJsonObject OpenKJEmbeddedApi::commandSearch(const QJsonObject &payload)
             song.insert("artist", artist);
             song.insert("title", title);
             song.insert("duration_seconds", std::max(1, query.value(3).toInt() / 1000));
+            if (query.value(4).toString() == kYoutubeDiscId)
+                song.insert("source", "youtube");
             songs.append(song);
         }
     }
@@ -1781,6 +1782,11 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"youtubeRequestPath", "/local/request/youtube"},
         {"youtubeCachedCheckPath", "/local/youtube/cached"},
         {"youtubeMaxDurationSecs", m_settings.youtubeMaxDurationSecs()},
+        // When true, previously downloaded videos appear in the ordinary song search
+        // and browse results carrying "source": "youtube". Badge them - they are
+        // singers' own uploads rather than tracks the KJ vetted. Songs without the
+        // key are library songs, exactly as before.
+        {"youtubeCachedSongsSearchable", m_settings.youtubeCachedSearchable()},
         // Queue entries backed by a video carry media_state (ready|pending|fetching|
         // failed) and media_progress. The keys are absent on library songs.
         {"supportsQueueMediaState", true},
@@ -2956,6 +2962,17 @@ QJsonObject OpenKJEmbeddedApi::requestSongFromLocalUser(const QJsonObject &paylo
     }
 
     return QJsonObject{{"ok", false}, {"error", response.value("errorString").toString("Could not queue song")}};
+}
+
+QString OpenKJEmbeddedApi::catalogFilterSql() const
+{
+    static const QString base = QStringLiteral("discid != '!!DROPPED!!' AND discid != '!!BAD!!' ");
+    if (!m_settings.youtubeCachedSearchable()) {
+        return base + QStringLiteral("AND discid != '!!YOUTUBE!!' ");
+    }
+    return base + QStringLiteral(
+            "AND (discid != '!!YOUTUBE!!' OR EXISTS (SELECT 1 FROM local_youtube_fetches yf "
+            "WHERE yf.songid = dbsongs.songid AND yf.state = 'ready')) ");
 }
 
 int OpenKJEmbeddedApi::ensureYoutubeSongRow(const QString &videoId, const QString &artist, const QString &title,

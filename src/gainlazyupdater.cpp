@@ -273,8 +273,14 @@ void LazyGainUpdateController::seedQueue()
     // KJ will actually hear tonight.
     QStringList queued;
     QSqlQuery queuedQuery;
+    // A song requested from YouTube is queued before its file exists. Analyzing it in
+    // that window finds nothing to read and stores the "failed" sentinel, which is
+    // never retried - so skip it until the download reports ready. The fetcher clears
+    // the gain column and re-prioritizes the song once the file is on disk.
     queuedQuery.exec("SELECT DISTINCT dbsongs.path FROM queueSongs, dbsongs "
-                     "WHERE queueSongs.song = dbsongs.songid AND queueSongs.played = 0 AND dbsongs.gain IS NULL");
+                     "WHERE queueSongs.song = dbsongs.songid AND queueSongs.played = 0 AND dbsongs.gain IS NULL "
+                     "AND NOT EXISTS (SELECT 1 FROM local_youtube_fetches f "
+                     "WHERE f.songid = dbsongs.songid AND f.state != 'ready')");
     while (queuedQuery.next())
         queued.append(queuedQuery.value(0).toString());
 
@@ -282,7 +288,10 @@ void LazyGainUpdateController::seedQueue()
     // the songs most likely to come up.
     QStringList rest;
     QSqlQuery restQuery;
-    restQuery.exec(QString("SELECT path FROM dbsongs WHERE gain IS NULL ORDER BY plays DESC, artist, title LIMIT %1")
+    restQuery.exec(QString("SELECT path FROM dbsongs WHERE gain IS NULL "
+                           "AND NOT EXISTS (SELECT 1 FROM local_youtube_fetches f "
+                           "WHERE f.songid = dbsongs.songid AND f.state != 'ready') "
+                           "ORDER BY plays DESC, artist, title LIMIT %1")
                            .arg(kSeedBatchSize));
     while (restQuery.next())
         rest.append(restQuery.value(0).toString());

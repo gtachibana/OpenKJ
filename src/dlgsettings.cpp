@@ -499,6 +499,14 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
                                          "connection while the show is running."));
     ytLayout->addRow(tr("Simultaneous downloads"), m_spinBoxYtConcurrent);
 
+    m_checkBoxYtSearchable = new QCheckBox(tr("Let singers find downloaded videos in song search"),
+                                           m_groupBoxYoutube);
+    m_checkBoxYtSearchable->setChecked(m_settings.youtubeCachedSearchable());
+    m_checkBoxYtSearchable->setToolTip(tr("Downloaded videos appear alongside your library, so the next singer who\n"
+                                          "wants one gets it with no wait and the collection grows itself.\n"
+                                          "Videos still downloading are never listed."));
+    ytLayout->addRow(QString(), m_checkBoxYtSearchable);
+
     auto *manageButton = new QPushButton(tr("Manage downloaded videos..."), m_groupBoxYoutube);
     ytLayout->addRow(QString(), manageButton);
 
@@ -571,6 +579,9 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
     });
     connect(m_spinBoxYtConcurrent, qOverload<int>(&QSpinBox::valueChanged), this, [this](const int count) {
         m_settings.setYoutubeMaxConcurrentFetches(count);
+    });
+    connect(m_checkBoxYtSearchable, &QCheckBox::toggled, this, [this](const bool searchable) {
+        m_settings.setYoutubeCachedSearchable(searchable);
     });
 
     refreshDlpStatusLabel();
