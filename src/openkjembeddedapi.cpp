@@ -40,6 +40,22 @@ constexpr int kLoginFailureLimit = 10;
 constexpr qint64 kLoginFailureWindowMs = 5 * 60 * 1000;
 constexpr qint64 kLoginLockoutMs = 5 * 60 * 1000;
 
+// A singer's session slides: every validation pushes expires_at back out to the
+// full window, so someone who turns up once a month never signs in twice, while a
+// token nobody has touched since ages out on its own. Thirty days is the window
+// rather than something enormous because the sliding is what makes it durable -
+// the length only has to outlast the gap between two visits.
+constexpr qint64 kUserSessionTtlSecs = 60 * 60 * 24 * 30;
+// isValidUserSession() runs on essentially every authenticated request, and this is
+// the Qt main thread, so the slide is throttled: only write once the stored expiry
+// has drifted at least this far from full. That is one UPDATE per singer per night
+// rather than one per tap, and the only cost of the slack is that a token can lapse
+// up to this long before it strictly had to.
+constexpr qint64 kUserSessionRefreshAfterSecs = 60 * 60 * 24;
+// The KJ's own session, unchanged and deliberately not sliding - it authorizes the
+// show-control routes, so it should expire on a schedule the KJ can reason about.
+constexpr qint64 kAdminSessionTtlSecs = 60 * 60 * 24 * 7;
+
 // PBKDF2 work factor. Deliberately below the usual web-app recommendation: this
 // runs on the Qt main thread, so the cost is paid as UI latency during a show.
 // 50k puts a login at roughly 50ms while making an offline crack of a leaked
@@ -2447,7 +2463,7 @@ bool OpenKJEmbeddedApi::storePassword(const QString &normalizedUsername, const Q
 QString OpenKJEmbeddedApi::createUserSession(const QString &normalizedUsername)
 {
     const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const qint64 expiresAt = QDateTime::currentSecsSinceEpoch() + (60 * 60 * 24 * 30);
+    const qint64 expiresAt = QDateTime::currentSecsSinceEpoch() + kUserSessionTtlSecs;
     QSqlQuery query;
     query.prepare("INSERT INTO local_user_sessions (token, username_normalized, expires_at) VALUES (:token, :username, :expires_at)");
     query.bindValue(":token", token);
@@ -2460,7 +2476,7 @@ QString OpenKJEmbeddedApi::createUserSession(const QString &normalizedUsername)
 QString OpenKJEmbeddedApi::createAdminSession()
 {
     const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const qint64 expiresAt = QDateTime::currentSecsSinceEpoch() + (60 * 60 * 24 * 7);
+    const qint64 expiresAt = QDateTime::currentSecsSinceEpoch() + kAdminSessionTtlSecs;
     QSqlQuery query;
     query.prepare("INSERT INTO local_admin_sessions (token, expires_at) VALUES (:token, :expires_at)");
     query.bindValue(":token", token);
@@ -2475,13 +2491,16 @@ bool OpenKJEmbeddedApi::isValidUserSession(const QString &token, QString *normal
         return false;
     }
 
+    const QString trimmed = token.trimmed();
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+
     QSqlQuery query;
-    query.prepare("SELECT u.username_normalized, u.username "
+    query.prepare("SELECT u.username_normalized, u.username, s.expires_at "
                   "FROM local_user_sessions s "
                   "JOIN local_users u ON u.username_normalized = s.username_normalized "
                   "WHERE s.token = :token AND s.expires_at > :now");
-    query.bindValue(":token", token.trimmed());
-    query.bindValue(":now", QDateTime::currentSecsSinceEpoch());
+    query.bindValue(":token", trimmed);
+    query.bindValue(":now", now);
     if (!query.exec() || !query.next()) {
         return false;
     }
@@ -2492,6 +2511,20 @@ bool OpenKJEmbeddedApi::isValidUserSession(const QString &token, QString *normal
     if (username) {
         *username = query.value(1).toString();
     }
+
+    // Slide the expiry forward. Throttled rather than written every time: the read
+    // above is what every authenticated request already pays for, and turning it
+    // into a read plus a write would put an UPDATE on the main thread behind every
+    // key nudge and every poll.
+    const qint64 fullExpiry = now + kUserSessionTtlSecs;
+    if (fullExpiry - query.value(2).toLongLong() >= kUserSessionRefreshAfterSecs) {
+        QSqlQuery slide;
+        slide.prepare("UPDATE local_user_sessions SET expires_at = :expires_at WHERE token = :token");
+        slide.bindValue(":expires_at", fullExpiry);
+        slide.bindValue(":token", trimmed);
+        slide.exec();
+    }
+
     return true;
 }
 
@@ -2743,6 +2776,42 @@ bool OpenKJEmbeddedApi::renameLocalUser(const QString &currentUsername, const QS
             *error = "The singer's account could not be updated.";
         return false;
     }
+
+    return true;
+}
+
+bool OpenKJEmbeddedApi::resetLocalUserPassword(const QString &username, const QString &newPassword, QString *error)
+{
+    if (!localUserExists(username)) {
+        if (error)
+            *error = QString("%1 doesn't have a singer account.").arg(username);
+        return false;
+    }
+
+    // The same floor registerLocalUser() applies, so a reset can't land on a password
+    // the singer would not have been allowed to choose.
+    if (newPassword.size() < 4) {
+        if (error)
+            *error = "The new password must be at least 4 characters.";
+        return false;
+    }
+
+    const QString normalized = normalizeUsername(username);
+    if (!storePassword(normalized, newPassword)) {
+        if (error)
+            *error = "The singer's account could not be updated.";
+        return false;
+    }
+
+    // A reset ends the sessions it replaces. The usual reason for one is that the
+    // singer has lost the account - a new phone, a cleared browser - and whatever
+    // still holds a token in that situation is not them. It also means the KJ can
+    // actually revoke access, which is otherwise impossible now that a session
+    // slides forward indefinitely.
+    QSqlQuery sessions;
+    sessions.prepare("DELETE FROM local_user_sessions WHERE username_normalized = :username");
+    sessions.bindValue(":username", normalized);
+    sessions.exec();
 
     return true;
 }

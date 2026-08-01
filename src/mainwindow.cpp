@@ -2559,6 +2559,11 @@ void MainWindow::tableViewRotationContextMenuRequested(const QPoint &pos) {
             contextMenu.addAction(paused ? "Mark as back" : "Mark as stepped away", [&, paused]() {
                 m_rotModel.singerSetPaused(m_rtClickRotationSingerId, !paused);
             });
+            // Offered only to singers who actually have a phone account - for anyone
+            // else there is no password to reset and the entry would just confuse.
+            if (m_embeddedApi.localUserExists(m_rotModel.getSinger(m_rtClickRotationSingerId).name)) {
+                contextMenu.addAction("Reset phone password", this, &MainWindow::resetSingerPassword);
+            }
         }
         contextMenu.exec(QCursor::pos());
     }
@@ -2589,6 +2594,35 @@ void MainWindow::renameSinger() {
     if (!renameLocalUserForSinger(currentName, name))
         return;
     m_rotModel.singerSetName(m_rtClickRotationSingerId, name);
+}
+
+void MainWindow::resetSingerPassword() {
+    const QString name = m_rotModel.getSinger(m_rtClickRotationSingerId).name;
+    bool ok;
+    // Shown in the clear rather than masked: the KJ has to read this back to the
+    // singer standing in front of them, and it is a throwaway they can change from
+    // their phone once they are in.
+    const QString password = QInputDialog::getText(this,
+                                                   "Reset phone password",
+                                                   "New password for " + name +
+                                                           ":\n\nRead it out to them - they can change it on their phone once "
+                                                           "they're signed back in. This also signs out any phone still logged "
+                                                           "in as them.",
+                                                   QLineEdit::Normal,
+                                                   QString(),
+                                                   &ok);
+    if (!ok || password.isEmpty())
+        return;
+
+    QString error;
+    if (!m_embeddedApi.resetLocalUserPassword(name, password, &error)) {
+        QMessageBox::warning(this, "Unable to reset password", error + " Nothing has been changed.", QMessageBox::Ok);
+        return;
+    }
+    QMessageBox::information(this,
+                             "Password reset",
+                             name + " can now sign in with that password.",
+                             QMessageBox::Ok);
 }
 
 bool MainWindow::renameLocalUserForSinger(const QString &currentName, const QString &newName) {

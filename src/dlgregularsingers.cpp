@@ -97,6 +97,13 @@ void DlgRegularSingers::on_tableViewRegulars_customContextMenuRequested(const QP
         m_rtClickHistorySingerId = index.sibling(index.row(),0).data().toInt();
         QMenu contextMenu(this);
         contextMenu.addAction(tr("Rename"), this, &DlgRegularSingers::renameHistorySinger);
+        // A regular who isn't in tonight's rotation can't be reached from the rotation's
+        // own menu, and someone locked out of their account is exactly the person who
+        // won't be in it yet.
+        if (m_embeddedApi && m_embeddedApi->localUserExists(m_historySingersModel.getName(m_rtClickHistorySingerId)))
+        {
+            contextMenu.addAction(tr("Reset phone password"), this, &DlgRegularSingers::resetSingerPassword);
+        }
         contextMenu.exec(QCursor::pos());
     }
 }
@@ -176,6 +183,35 @@ void DlgRegularSingers::renameHistorySinger()
         // stale name on screen.
         regularsChanged();
     }
+}
+
+void DlgRegularSingers::resetSingerPassword()
+{
+    if (!m_embeddedApi)
+        return;
+
+    const QString name = m_historySingersModel.getName(m_rtClickHistorySingerId);
+    bool ok;
+    // Unmasked deliberately - the KJ has to read it back to the singer, and it is a
+    // throwaway they can change from their phone once they're in.
+    const QString password = QInputDialog::getText(this,
+                                                   tr("Reset phone password"),
+                                                   tr("New password for %1:\n\nRead it out to them - they can change it on "
+                                                      "their phone once they're signed back in. This also signs out any "
+                                                      "phone still logged in as them.").arg(name),
+                                                   QLineEdit::Normal,
+                                                   QString(),
+                                                   &ok);
+    if (!ok || password.isEmpty())
+        return;
+
+    QString error;
+    if (!m_embeddedApi->resetLocalUserPassword(name, password, &error))
+    {
+        QMessageBox::warning(this, tr("Unable to reset password"), error + tr(" Nothing has been changed."), QMessageBox::Ok);
+        return;
+    }
+    QMessageBox::information(this, tr("Password reset"), tr("%1 can now sign in with that password.").arg(name), QMessageBox::Ok);
 }
 
 void DlgRegularSingers::on_lineEditSearch_textChanged(const QString &arg1)
