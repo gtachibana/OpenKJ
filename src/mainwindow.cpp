@@ -211,28 +211,12 @@ void MainWindow::setupShortcuts() {
     connect(&m_scutKSelectNextSinger, &QShortcut::activated, [&]() {
         okj::RotationSinger nextSinger;
         QString nextSongPath;
-        bool empty{false};
         int curSingerId{m_rotModel.currentSinger()};
         int curPos{m_rotModel.getSinger(curSingerId).position};
         if (curSingerId == -1)
             curPos = static_cast<int>(m_rotModel.singerCount() - 1);
-        int loops = 0;
-        while ((nextSongPath == "") && (!empty)) {
-            if (loops > m_rotModel.singerCount()) {
-                empty = true;
-            } else {
-                if (++curPos >= m_rotModel.singerCount()) {
-                    curPos = 0;
-                }
-                nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                if (!nextSinger.paused)
-                    nextSongPath = nextSinger.nextSongPath();
-                loops++;
-            }
-        }
-        if (empty) {
-            QMessageBox::information(this, "Unable to select next",
-                                     "Sorry, no unsung karaoke songs are currently in any singer's queue");
+        if (!findNextPlayableSinger(curPos, false, nextSinger, nextSongPath)) {
+            QMessageBox::information(this, "Unable to select next", noSongsToPlayMessage());
             return;
         }
         ui->tableViewRotation->clearSelection();
@@ -265,28 +249,12 @@ void MainWindow::setupShortcuts() {
         }
         okj::RotationSinger nextSinger;
         QString nextSongPath;
-        bool empty{false};
         int curSingerId{m_rotModel.currentSinger()};
         int curPos{m_rotModel.getSinger(curSingerId).position};
         if (curSingerId == -1)
             curPos = static_cast<int>(m_rotModel.singerCount() - 1);
-        int loops = 0;
-        while ((nextSongPath == "") && (!empty)) {
-            if (loops > m_rotModel.singerCount()) {
-                empty = true;
-            } else {
-                if (++curPos >= m_rotModel.singerCount()) {
-                    curPos = 0;
-                }
-                nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                if (!nextSinger.paused)
-                    nextSongPath = nextSinger.nextSongPath();
-                loops++;
-            }
-        }
-        if (empty) {
-            QMessageBox::information(this, "Unable to play next",
-                                     "Sorry, no unsung karaoke songs are currently in any singer's queue");
+        if (!findNextPlayableSinger(curPos, false, nextSinger, nextSongPath)) {
+            QMessageBox::information(this, "Unable to play next", noSongsToPlayMessage());
             return;
         }
         m_curSinger = nextSinger.name;
@@ -831,6 +799,19 @@ MainWindow::MainWindow(QWidget *parent) :
     setupConnections();
 
     connect(&m_embeddedApi, &OpenKJEmbeddedApi::songSubmitted, this, &MainWindow::startAutoPlayIfIdle);
+    // A download finishing can make a singer playable who was passed over a moment ago.
+    // If every singer was skipped for that reason the rotation has already given up, so
+    // without this the show would sit idle until the KJ noticed and started it by hand.
+    connect(&m_youtubeFetcher, &YoutubeFetcher::fetchFinished, this,
+            [this](const QString &, int, bool ok, const QString &) {
+                if (!ok)
+                    return;
+                // The fetcher has just cleared this song's stored gain, so put it back
+                // in front of the loudness analyzer now that there is a file to read.
+                // Downloads vary wildly in level and are the songs most in need of it.
+                prioritizeGainAnalysisForQueue();
+                startAutoPlayIfIdle();
+            });
     connect(&m_embeddedApi, &OpenKJEmbeddedApi::pitchChangeRequested, this, &MainWindow::applyApiPitchChange);
     // Queued so the stop - which fades, and pumps the event loop while it does - runs
     // after the HTTP response has gone back out, rather than re-entering the socket
@@ -862,6 +843,9 @@ MainWindow::MainWindow(QWidget *parent) :
                            m_settings.embeddedApiBindAddress().toStdString(),
                            m_settings.embeddedApiPort());
         }
+        // Probes yt-dlp and picks up anything a previous run left unfinished. Both are
+        // asynchronous - nothing here delays getting the window on screen.
+        m_youtubeFetcher.start();
     }
 
     m_timerSlowUiUpdate.start(10000);
@@ -1365,6 +1349,16 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
             "CREATE TABLE IF NOT EXISTS local_event_settings ( settings_id INTEGER PRIMARY KEY CHECK(settings_id = 1), app_name TEXT NOT NULL DEFAULT 'OpenKJ', tagline TEXT NOT NULL DEFAULT '')");
     query.exec(
             "CREATE TABLE IF NOT EXISTS local_user_favorites ( username_normalized TEXT NOT NULL, song_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (username_normalized, song_id))");
+    // Fetch state for songs requested off YouTube. One row per video, keyed on the
+    // video id rather than songid because the dbsongs row is created first and the
+    // cache path is derived from the video id. state is pending|fetching|ready|failed.
+    query.exec(
+            "CREATE TABLE IF NOT EXISTS local_youtube_fetches ( video_id TEXT PRIMARY KEY, songid INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', progress INTEGER NOT NULL DEFAULT 0, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, requested_by TEXT, updated_at INTEGER NOT NULL DEFAULT 0)");
+    query.exec("CREATE INDEX IF NOT EXISTS idx_yt_fetches_songid ON local_youtube_fetches(songid)");
+    // Nothing is downloading at startup, so any row still marked fetching belongs to a
+    // run that died mid-download. Put it back in the queue rather than leaving a request
+    // that the rotation will skip forever.
+    query.exec("UPDATE local_youtube_fetches SET state = 'pending', progress = 0 WHERE state = 'fetching'");
     query.exec("INSERT OR IGNORE INTO local_event_settings (settings_id, app_name, tagline) VALUES (1, 'OpenKJ', '')");
     query.exec("PRAGMA synchronous=OFF");
     query.exec("PRAGMA cache_size=300000");
@@ -1484,6 +1478,19 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
 
 
 void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
+    // Covers every entry point at once, including the KJ double-clicking a singer,
+    // which never goes through the rotation search. Without it the media backend
+    // reports the missing file as end-of-media the instant it starts (see
+    // MediaBackend::play), the singer's turn is marked played anyway, and they lose
+    // their slot to a song that flashed past in a fraction of a second.
+    if (!songPathIsPlayable(karaokeFilePath)) {
+        m_logger->warn("{} Refusing to play a video that is not downloaded yet: {}", m_loggingPrefix,
+                       karaokeFilePath.toStdString());
+        QMessageBox::warning(this, tr("Song not ready yet"),
+                             tr("This song was requested from YouTube and is still downloading.\n\n"
+                                "It will play once the download finishes."), QMessageBox::Ok);
+        return;
+    }
     m_mediaTempDir = std::make_unique<QTemporaryDir>();
     // Levels this track against the rest of the library. Songs the gain updater hasn't
     // reached yet read back as 0 dB and play at their recorded level, same as before.
@@ -1670,8 +1677,12 @@ void MainWindow::prioritizeGainAnalysisForQueue() {
         return;
     QStringList paths;
     QSqlQuery query;
+    // Mirrors LazyGainUpdateController::seedQueue - a video still downloading has no
+    // file to analyze, and a failed analysis is never retried.
     query.exec("SELECT DISTINCT dbsongs.path FROM queueSongs, dbsongs "
-               "WHERE queueSongs.song = dbsongs.songid AND queueSongs.played = 0 AND dbsongs.gain IS NULL");
+               "WHERE queueSongs.song = dbsongs.songid AND queueSongs.played = 0 AND dbsongs.gain IS NULL "
+               "AND NOT EXISTS (SELECT 1 FROM local_youtube_fetches f "
+               "WHERE f.songid = dbsongs.songid AND f.state != 'ready')");
     while (query.next())
         paths.append(query.value(0).toString());
     m_lazyGainUpdater->prioritize(paths);
@@ -2024,6 +2035,7 @@ void MainWindow::actionImportRegularsTriggered() {
 void MainWindow::actionSettingsTriggered() {
     auto settingsDialog = new DlgSettings(m_mediaBackendKar, m_mediaBackendBm, m_songbookApi, this);
     settingsDialog->setModal(true);
+    settingsDialog->setYoutubeFetcher(&m_youtubeFetcher);
 
     connect(settingsDialog, &DlgSettings::videoOffsetChanged, [&](auto offsetMs) {
         m_mediaBackendKar.setVideoOffset(offsetMs);
@@ -2042,6 +2054,7 @@ void MainWindow::actionSettingsTriggered() {
         if (mode == Settings::LocalMode && m_settings.embeddedApiEnabled()) {
             m_embeddedApi.start(static_cast<quint16>(m_settings.embeddedApiPort()),
                                 QHostAddress(m_settings.embeddedApiBindAddress()));
+            m_youtubeFetcher.start();
         }
     });
     connect(settingsDialog, &DlgSettings::rotationShowNextSongChanged, [&]() { autosizeRotationCols(); });
@@ -2288,7 +2301,6 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
             } else {
                 okj::RotationSinger nextSinger;
                 QString nextSongPath;
-                bool empty = false;
 
                 int curSingerId = m_rotModel.currentSinger();
 
@@ -2297,28 +2309,7 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
                     curPos = m_curSingerOriginalPosition;
                 if (curSingerId == -1)
                     curPos = static_cast<int>(m_rotModel.singerCount() - 1);
-                int loops = 0;
-                // Under "current singer on top", the current singer still physically
-                // occupies position 0 at this point (they aren't moved to the bottom
-                // until after this search), so if their original position was last in
-                // line, wrapping around would immediately land back on themselves.
-                // Don't let that count as "next" until every other singer has had a
-                // chance, otherwise a singer with 2+ queued songs can play back to back.
-                int otherSingers = std::max(static_cast<int>(m_rotModel.singerCount()) - 1, 0);
-                while ((nextSongPath == "") && (!empty)) {
-                    if (loops > m_rotModel.singerCount()) {
-                        empty = true;
-                    } else {
-                        if (++curPos >= m_rotModel.singerCount()) {
-                            curPos = 0;
-                        }
-                        nextSinger = m_rotModel.getSingerAtPosition(curPos);
-                        if ((nextSinger.id != curSingerId || loops >= otherSingers) && !nextSinger.paused)
-                            nextSongPath = nextSinger.nextSongPath();
-                        loops++;
-                    }
-                }
-                if (empty)
+                if (!findNextPlayableSinger(curPos, true, nextSinger, nextSongPath))
                     m_logger->info("{} KaraokeAA - No more songs to play, giving up", m_loggingPrefix);
                 else {
                     m_kAANextSinger = nextSinger.id;
@@ -4926,6 +4917,53 @@ void MainWindow::showAddSingerDialog() {
 // if nothing is playing or paused and no countdown is already running. Triggered by
 // song submissions from the embedded API and, when the "auto play first song" setting
 // is enabled, by songs added locally through the UI.
+QString MainWindow::noSongsToPlayMessage() const {
+    const QString base = tr("Sorry, no unsung karaoke songs are currently in any singer's queue");
+    if (const int pending = m_youtubeFetcher.pendingCount(); pending > 0) {
+        // Otherwise the KJ is told the queue is empty while a request sits right there
+        // in the rotation, waiting on its download.
+        return base + tr("\n\n%n song(s) requested from YouTube are still downloading and will "
+                         "become playable once they finish.", nullptr, pending);
+    }
+    return base;
+}
+
+bool MainWindow::findNextPlayableSinger(const int startPosition, const bool deferCurrentSinger,
+                                        okj::RotationSinger &nextSinger, QString &nextSongPath) {
+    nextSongPath.clear();
+    bool empty{false};
+    const int curSingerId = m_rotModel.currentSinger();
+    int curPos = startPosition;
+    // Under "current singer on top", the current singer still physically occupies
+    // position 0 when this runs (they aren't moved to the bottom until afterwards), so
+    // if their original position was last in line, wrapping around would immediately
+    // land back on themselves. Don't let that count as "next" until every other singer
+    // has had a chance, otherwise a singer with 2+ queued songs can play back to back.
+    const int otherSingers = std::max(static_cast<int>(m_rotModel.singerCount()) - 1, 0);
+    int loops = 0;
+    while ((nextSongPath == "") && (!empty)) {
+        if (loops > m_rotModel.singerCount()) {
+            empty = true;
+        } else {
+            if (++curPos >= m_rotModel.singerCount())
+                curPos = 0;
+            nextSinger = m_rotModel.getSingerAtPosition(curPos);
+            const bool turnIsTheirs =
+                    !deferCurrentSinger || nextSinger.id != curSingerId || loops >= otherSingers;
+            if (turnIsTheirs && !nextSinger.paused) {
+                // A video requested from YouTube that hasn't finished downloading is not
+                // playable yet. Pass over the singer for this round rather than stalling
+                // the rotation or spending their turn on a file that isn't there - the
+                // request stays queued and comes back around on the next pass.
+                if (const QString candidate = nextSinger.nextSongPath(); songPathIsPlayable(candidate))
+                    nextSongPath = candidate;
+            }
+            loops++;
+        }
+    }
+    return !empty;
+}
+
 void MainWindow::startAutoPlayIfIdle() {
     if (!m_settings.karaokeAutoAdvance() && !m_settings.karaokeAutoPlayFirstSong())
         return;
@@ -4937,31 +4975,13 @@ void MainWindow::startAutoPlayIfIdle() {
 
     okj::RotationSinger nextSinger;
     QString nextSongPath;
-    bool empty = false;
     int curSingerId = m_rotModel.currentSinger();
     int curPos = m_rotModel.getSinger(curSingerId).position;
     if (m_settings.rotationAltSortOrder())
         curPos = m_curSingerOriginalPosition;
     if (curSingerId == -1)
         curPos = static_cast<int>(m_rotModel.singerCount() - 1);
-    int loops = 0;
-    // See karaokeMediaBackend_stateChanged: under "current singer on top", curPos may
-    // wrap back onto the current singer's own slot before every other singer has been
-    // checked, so don't accept them as "next" until everyone else has had a chance.
-    int otherSingers = std::max(static_cast<int>(m_rotModel.singerCount()) - 1, 0);
-    while ((nextSongPath == "") && (!empty)) {
-        if (loops > m_rotModel.singerCount()) {
-            empty = true;
-        } else {
-            if (++curPos >= m_rotModel.singerCount())
-                curPos = 0;
-            nextSinger = m_rotModel.getSingerAtPosition(curPos);
-            if ((nextSinger.id != curSingerId || loops >= otherSingers) && !nextSinger.paused)
-                nextSongPath = nextSinger.nextSongPath();
-            loops++;
-        }
-    }
-    if (empty) {
+    if (!findNextPlayableSinger(curPos, true, nextSinger, nextSongPath)) {
         m_logger->info("{} KaraokeAA (idle) - No unplayed songs found, not starting autoplay", m_loggingPrefix);
         return;
     }

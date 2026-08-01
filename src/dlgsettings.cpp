@@ -28,6 +28,9 @@
 #include <QMessageBox>
 #include <QLabel>
 #include <QFormLayout>
+#include <QHBoxLayout>
+#include <QDir>
+#include <QFileInfo>
 #include <QSqlQuery>
 #include <QtSql>
 #include <QVBoxLayout>
@@ -36,6 +39,7 @@
 #include <QAuthenticator>
 #include <QKeySequenceEdit>
 #include "audiorecorder.h"
+#include "dlgyoutubecache.h"
 #include <QScreen>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -410,6 +414,257 @@ void DlgSettings::setupModeWidgets()
     connect(m_spinBoxUpNextTurns, qOverload<int>(&QSpinBox::valueChanged), this, [&](int turns) {
         m_settings.setEmbeddedApiUpNextTurns(turns);
     });
+
+    setupYoutubeWidgets(networkLayout);
+}
+
+void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
+{
+    m_groupBoxYoutube = new QGroupBox(tr("YouTube requests"), ui->tabWidgetPage3);
+    m_groupBoxYoutube->setCheckable(true);
+    m_groupBoxYoutube->setChecked(m_settings.youtubeRequestsEnabled());
+    m_groupBoxYoutube->setToolTip(tr("Lets singers search YouTube from their phone and queue a video.\n"
+                                     "Requires yt-dlp, which downloads the video to this machine before it plays."));
+    auto *ytLayout = new QFormLayout(m_groupBoxYoutube);
+
+    m_lineEditDlpPath = new QLineEdit(m_settings.youtubeDlpPath(), m_groupBoxYoutube);
+    auto *dlpRow = new QHBoxLayout;
+    auto *dlpBrowse = new QPushButton(tr("Browse..."), m_groupBoxYoutube);
+    dlpRow->addWidget(m_lineEditDlpPath);
+    dlpRow->addWidget(dlpBrowse);
+    ytLayout->addRow(tr("yt-dlp path"), dlpRow);
+
+    m_labelDlpStatus = new QLabel(m_groupBoxYoutube);
+    m_labelDlpStatus->setWordWrap(true);
+    m_buttonDlpUpdate = new QPushButton(tr("Update yt-dlp now"), m_groupBoxYoutube);
+    auto *statusRow = new QHBoxLayout;
+    statusRow->addWidget(m_labelDlpStatus, 1);
+    statusRow->addWidget(m_buttonDlpUpdate);
+    ytLayout->addRow(tr("Status"), statusRow);
+
+    m_comboDlpChannel = new QComboBox(m_groupBoxYoutube);
+    m_comboDlpChannel->addItem(tr("Nightly (recommended)"), "nightly");
+    m_comboDlpChannel->addItem(tr("Stable"), "stable");
+    m_comboDlpChannel->setCurrentIndex(m_settings.youtubeDlpChannel() == "stable" ? 1 : 0);
+    m_comboDlpChannel->setToolTip(tr("YouTube extractor fixes reach nightly days before stable.\n"
+                                     "A broken extractor mid-show is the failure worth avoiding."));
+    ytLayout->addRow(tr("Update channel"), m_comboDlpChannel);
+
+    m_lineEditYtCacheDir = new QLineEdit(m_settings.youtubeCacheDir(), m_groupBoxYoutube);
+    auto *cacheRow = new QHBoxLayout;
+    auto *cacheBrowse = new QPushButton(tr("Browse..."), m_groupBoxYoutube);
+    cacheRow->addWidget(m_lineEditYtCacheDir);
+    cacheRow->addWidget(cacheBrowse);
+    ytLayout->addRow(tr("Cache folder"), cacheRow);
+
+    m_labelYtCacheWarning = new QLabel(m_groupBoxYoutube);
+    m_labelYtCacheWarning->setWordWrap(true);
+    m_labelYtCacheWarning->setStyleSheet("color: firebrick;");
+    m_labelYtCacheWarning->setVisible(false);
+    ytLayout->addRow(QString(), m_labelYtCacheWarning);
+
+    m_spinBoxYtMaxDuration = new QSpinBox(m_groupBoxYoutube);
+    m_spinBoxYtMaxDuration->setRange(1, 120);
+    m_spinBoxYtMaxDuration->setValue(m_settings.youtubeMaxDurationSecs() / 60);
+    m_spinBoxYtMaxDuration->setSuffix(tr(" minutes"));
+    m_spinBoxYtMaxDuration->setToolTip(tr("Requests longer than this are refused, which keeps hour-long\n"
+                                          "compilation uploads out of the rotation."));
+    ytLayout->addRow(tr("Longest video"), m_spinBoxYtMaxDuration);
+
+    m_spinBoxYtMaxHeight = new QSpinBox(m_groupBoxYoutube);
+    m_spinBoxYtMaxHeight->setRange(360, 2160);
+    m_spinBoxYtMaxHeight->setSingleStep(360);
+    m_spinBoxYtMaxHeight->setValue(m_settings.youtubeMaxHeight());
+    m_spinBoxYtMaxHeight->setSuffix(tr("p"));
+    ytLayout->addRow(tr("Max quality"), m_spinBoxYtMaxHeight);
+
+    m_spinBoxYtCacheMaxGb = new QSpinBox(m_groupBoxYoutube);
+    m_spinBoxYtCacheMaxGb->setRange(1, 1000);
+    m_spinBoxYtCacheMaxGb->setValue(m_settings.youtubeCacheMaxGb());
+    m_spinBoxYtCacheMaxGb->setSuffix(tr(" GB"));
+    ytLayout->addRow(tr("Cache size limit"), m_spinBoxYtCacheMaxGb);
+
+    m_spinBoxYtKeepDays = new QSpinBox(m_groupBoxYoutube);
+    m_spinBoxYtKeepDays->setRange(1, 3650);
+    m_spinBoxYtKeepDays->setValue(m_settings.youtubeCacheKeepDays());
+    m_spinBoxYtKeepDays->setSuffix(tr(" days"));
+    m_spinBoxYtKeepDays->setToolTip(tr("One-off requests are dropped after this long.\n"
+                                       "Videos that get sung again are kept."));
+    ytLayout->addRow(tr("Keep unused videos"), m_spinBoxYtKeepDays);
+
+    m_spinBoxYtConcurrent = new QSpinBox(m_groupBoxYoutube);
+    m_spinBoxYtConcurrent->setRange(1, 4);
+    m_spinBoxYtConcurrent->setValue(m_settings.youtubeMaxConcurrentFetches());
+    m_spinBoxYtConcurrent->setToolTip(tr("Downloads running at once. Each one competes for the venue's\n"
+                                         "connection while the show is running."));
+    ytLayout->addRow(tr("Simultaneous downloads"), m_spinBoxYtConcurrent);
+
+    m_checkBoxYtSearchable = new QCheckBox(tr("Let singers find downloaded videos in song search"),
+                                           m_groupBoxYoutube);
+    m_checkBoxYtSearchable->setChecked(m_settings.youtubeCachedSearchable());
+    m_checkBoxYtSearchable->setToolTip(tr("Downloaded videos appear alongside your library, so the next singer who\n"
+                                          "wants one gets it with no wait and the collection grows itself.\n"
+                                          "Videos still downloading are never listed."));
+    ytLayout->addRow(QString(), m_checkBoxYtSearchable);
+
+    auto *manageButton = new QPushButton(tr("Manage downloaded videos..."), m_groupBoxYoutube);
+    ytLayout->addRow(QString(), manageButton);
+
+    networkLayout->insertWidget(2, m_groupBoxYoutube);
+
+    connect(manageButton, &QPushButton::clicked, this, [this]() {
+        if (!m_youtubeFetcher)
+            return;
+        DlgYoutubeCache dlg(*m_youtubeFetcher, m_settings, this);
+        dlg.exec();
+    });
+
+    connect(m_groupBoxYoutube, &QGroupBox::toggled, this, [this](const bool enabled) {
+        m_settings.setYoutubeRequestsEnabled(enabled);
+        // start() reads the setting and either spins the fetcher up - probe, resume
+        // anything left pending, arm the timeout sweep - or shuts it back down.
+        if (m_youtubeFetcher)
+            m_youtubeFetcher->start();
+        refreshDlpStatusLabel();
+    });
+    connect(dlpBrowse, &QPushButton::clicked, this, [this]() {
+        const QString path = QFileDialog::getOpenFileName(this, tr("Select yt-dlp"),
+                                                          QFileInfo(m_lineEditDlpPath->text()).absolutePath());
+        if (path.isEmpty())
+            return;
+        m_lineEditDlpPath->setText(path);
+        m_settings.setYoutubeDlpPath(path);
+        if (m_youtubeFetcher)
+            m_youtubeFetcher->refreshAvailability();
+    });
+    connect(m_lineEditDlpPath, &QLineEdit::editingFinished, this, [this]() {
+        m_settings.setYoutubeDlpPath(m_lineEditDlpPath->text().trimmed());
+        if (m_youtubeFetcher)
+            m_youtubeFetcher->refreshAvailability();
+    });
+    connect(m_buttonDlpUpdate, &QPushButton::clicked, this, [this]() {
+        if (!m_youtubeFetcher)
+            return;
+        m_buttonDlpUpdate->setEnabled(false);
+        m_labelDlpStatus->setText(tr("Updating..."));
+        m_youtubeFetcher->updateNow();
+    });
+    connect(m_comboDlpChannel, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](const int index) {
+        m_settings.setYoutubeDlpChannel(m_comboDlpChannel->itemData(index).toString());
+    });
+    connect(cacheBrowse, &QPushButton::clicked, this, [this]() {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Select cache folder"),
+                                                              m_lineEditYtCacheDir->text());
+        if (dir.isEmpty())
+            return;
+        m_lineEditYtCacheDir->setText(dir);
+        m_settings.setYoutubeCacheDir(dir);
+        refreshYtCacheWarning();
+    });
+    connect(m_lineEditYtCacheDir, &QLineEdit::editingFinished, this, [this]() {
+        m_settings.setYoutubeCacheDir(m_lineEditYtCacheDir->text().trimmed());
+        refreshYtCacheWarning();
+    });
+    connect(m_spinBoxYtMaxDuration, qOverload<int>(&QSpinBox::valueChanged), this, [this](const int minutes) {
+        m_settings.setYoutubeMaxDurationSecs(minutes * 60);
+    });
+    connect(m_spinBoxYtMaxHeight, qOverload<int>(&QSpinBox::valueChanged), this, [this](const int height) {
+        m_settings.setYoutubeMaxHeight(height);
+    });
+    connect(m_spinBoxYtCacheMaxGb, qOverload<int>(&QSpinBox::valueChanged), this, [this](const int gb) {
+        m_settings.setYoutubeCacheMaxGb(gb);
+    });
+    connect(m_spinBoxYtKeepDays, qOverload<int>(&QSpinBox::valueChanged), this, [this](const int days) {
+        m_settings.setYoutubeCacheKeepDays(days);
+    });
+    connect(m_spinBoxYtConcurrent, qOverload<int>(&QSpinBox::valueChanged), this, [this](const int count) {
+        m_settings.setYoutubeMaxConcurrentFetches(count);
+    });
+    connect(m_checkBoxYtSearchable, &QCheckBox::toggled, this, [this](const bool searchable) {
+        m_settings.setYoutubeCachedSearchable(searchable);
+    });
+
+    refreshDlpStatusLabel();
+    refreshYtCacheWarning();
+}
+
+void DlgSettings::setYoutubeFetcher(YoutubeFetcher *fetcher)
+{
+    m_youtubeFetcher = fetcher;
+    if (!m_youtubeFetcher)
+        return;
+    connect(m_youtubeFetcher, &YoutubeFetcher::availabilityChanged, this, [this](bool) {
+        refreshDlpStatusLabel();
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::updateFinished, this, [this](const bool ok, const QString &message) {
+        if (m_buttonDlpUpdate)
+            m_buttonDlpUpdate->setEnabled(true);
+        refreshDlpStatusLabel();
+        if (!ok && isVisible())
+            QMessageBox::warning(this, tr("yt-dlp update failed"), message);
+    });
+    refreshDlpStatusLabel();
+}
+
+void DlgSettings::refreshDlpStatusLabel()
+{
+    if (!m_labelDlpStatus)
+        return;
+    if (m_buttonDlpUpdate)
+        m_buttonDlpUpdate->setEnabled(m_youtubeFetcher != nullptr);
+
+    if (!m_youtubeFetcher) {
+        m_labelDlpStatus->setText(tr("Unavailable in this mode."));
+        return;
+    }
+    if (!QFileInfo::exists(m_settings.youtubeDlpPath())) {
+        m_labelDlpStatus->setText(tr("<b>Not found.</b> Download yt-dlp and point this at it."));
+        return;
+    }
+    if (!m_youtubeFetcher->isAvailable()) {
+        m_labelDlpStatus->setText(tr("<b>Found but not responding.</b> Requests are refused until it works."));
+        return;
+    }
+    m_labelDlpStatus->setText(tr("Ready - version %1").arg(m_youtubeFetcher->version()));
+}
+
+void DlgSettings::refreshYtCacheWarning()
+{
+    if (!m_labelYtCacheWarning)
+        return;
+
+    const QString cacheDir = QDir(m_settings.youtubeCacheDir()).absolutePath();
+    QSqlQuery query;
+    QString clash;
+    if (query.exec("SELECT path FROM sourceDirs")) {
+        while (query.next()) {
+            const QString sourceDir = QDir(query.value(0).toString()).absolutePath();
+            if (sourceDir.isEmpty())
+                continue;
+            // Case-insensitive throughout: on Windows these are the same folder, and a
+            // warning that depends on how the KJ typed the drive letter is worse than
+            // no warning at all. The trailing separator is what keeps a sibling folder
+            // like "LibraryOther" from matching "Library".
+            if (QString::compare(cacheDir, sourceDir, Qt::CaseInsensitive) == 0 ||
+                cacheDir.startsWith(sourceDir + '/', Qt::CaseInsensitive)) {
+                clash = sourceDir;
+                break;
+            }
+        }
+    }
+
+    if (clash.isEmpty()) {
+        m_labelYtCacheWarning->setVisible(false);
+        return;
+    }
+    // A library scan only enumerates songs under source dirs. Put the cache inside
+    // one and every downloaded video becomes a scanned library song - and every
+    // pending one becomes a "missing file" the KJ gets offered the chance to delete.
+    m_labelYtCacheWarning->setText(tr("This folder is inside the library source folder %1. "
+                                      "Move it somewhere outside your library, or a database scan will "
+                                      "treat cached videos as library songs and offer to delete pending ones.")
+                                           .arg(clash));
+    m_labelYtCacheWarning->setVisible(true);
 }
 
 void DlgSettings::refreshNetworkModeUi()
@@ -428,6 +683,12 @@ void DlgSettings::refreshNetworkModeUi()
     if (m_groupBoxLocalMode) {
         m_groupBoxLocalMode->setVisible(true);
         m_groupBoxLocalMode->setEnabled(!classicMode);
+    }
+    if (m_groupBoxYoutube) {
+        // Requests only reach this build through the embedded API, which Classic mode
+        // does not run.
+        m_groupBoxYoutube->setEnabled(!classicMode);
+        refreshDlpStatusLabel();
     }
 }
 

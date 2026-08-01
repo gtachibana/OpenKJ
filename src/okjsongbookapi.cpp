@@ -162,14 +162,14 @@ void OKJSongbookAPI::updateSongDb()
     int numEntries = 0;
     if (cancelUpdate)
         return;
-    if (query.exec("SELECT COUNT(DISTINCT artist||title) FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!'"))
+    if (query.exec("SELECT COUNT(DISTINCT artist||title) FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' AND discid != '!!YOUTUBE!!'"))
     {
         if (query.next())
             numEntries = query.value(0).toInt();
     }
     if (cancelUpdate)
         return;
-    if (query.exec("SELECT DISTINCT artist,title FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' ORDER BY artist ASC, title ASC"))
+    if (query.exec("SELECT DISTINCT artist,title FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' AND discid != '!!YOUTUBE!!' ORDER BY artist ASC, title ASC"))
     {
         if (cancelUpdate)
             return;

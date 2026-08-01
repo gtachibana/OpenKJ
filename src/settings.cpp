@@ -1749,6 +1749,121 @@ QString Settings::embeddedApiTrustedProxies()
     return scopedValue("embeddedApiTrustedProxies", "", false, LocalMode).toString();
 }
 
+bool Settings::youtubeRequestsEnabled()
+{
+    return scopedValue("youtubeRequestsEnabled", false, false, LocalMode).toBool();
+}
+
+void Settings::setYoutubeRequestsEnabled(bool enabled)
+{
+    setScopedValue("youtubeRequestsEnabled", enabled, LocalMode);
+}
+
+QString Settings::youtubeCacheDir()
+{
+    const QString configured = scopedValue("youtubeCacheDir", "", false, LocalMode).toString().trimmed();
+    if (!configured.isEmpty())
+        return configured;
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QDir::separator() + "yt-cache";
+}
+
+void Settings::setYoutubeCacheDir(const QString &path)
+{
+    setScopedValue("youtubeCacheDir", path.trimmed(), LocalMode);
+}
+
+int Settings::youtubeCacheMaxGb()
+{
+    return std::clamp(scopedValue("youtubeCacheMaxGb", 20, false, LocalMode).toInt(), 1, 1000);
+}
+
+void Settings::setYoutubeCacheMaxGb(int gb)
+{
+    setScopedValue("youtubeCacheMaxGb", std::clamp(gb, 1, 1000), LocalMode);
+}
+
+int Settings::youtubeCacheKeepDays()
+{
+    return std::clamp(scopedValue("youtubeCacheKeepDays", 30, false, LocalMode).toInt(), 1, 3650);
+}
+
+void Settings::setYoutubeCacheKeepDays(int days)
+{
+    setScopedValue("youtubeCacheKeepDays", std::clamp(days, 1, 3650), LocalMode);
+}
+
+QString Settings::youtubeDlpPath()
+{
+    const QString configured = scopedValue("youtubeDlpPath", "", false, LocalMode).toString().trimmed();
+    if (!configured.isEmpty())
+        return configured;
+#ifdef Q_OS_WIN
+    return QCoreApplication::applicationDirPath() + QDir::separator() + "yt-dlp.exe";
+#else
+    return QCoreApplication::applicationDirPath() + QDir::separator() + "yt-dlp";
+#endif
+}
+
+void Settings::setYoutubeDlpPath(const QString &path)
+{
+    setScopedValue("youtubeDlpPath", path.trimmed(), LocalMode);
+}
+
+QString Settings::youtubeDlpChannel()
+{
+    // Anything unrecognized reads back as nightly rather than being passed through to
+    // --update-to, which takes arbitrary strings and would happily accept a typo.
+    const QString channel = scopedValue("youtubeDlpChannel", "nightly", false, LocalMode).toString().trimmed().toLower();
+    return channel == "stable" ? QStringLiteral("stable") : QStringLiteral("nightly");
+}
+
+void Settings::setYoutubeDlpChannel(const QString &channel)
+{
+    setScopedValue("youtubeDlpChannel", channel.trimmed().toLower() == "stable" ? "stable" : "nightly", LocalMode);
+}
+
+int Settings::youtubeMaxHeight()
+{
+    return std::clamp(scopedValue("youtubeMaxHeight", 720, false, LocalMode).toInt(), 360, 2160);
+}
+
+void Settings::setYoutubeMaxHeight(int height)
+{
+    setScopedValue("youtubeMaxHeight", std::clamp(height, 360, 2160), LocalMode);
+}
+
+int Settings::youtubeMaxDurationSecs()
+{
+    return std::clamp(scopedValue("youtubeMaxDurationSecs", 600, false, LocalMode).toInt(), 60, 7200);
+}
+
+void Settings::setYoutubeMaxDurationSecs(int secs)
+{
+    setScopedValue("youtubeMaxDurationSecs", std::clamp(secs, 60, 7200), LocalMode);
+}
+
+int Settings::youtubeMaxConcurrentFetches()
+{
+    // Each one is a live yt-dlp process competing for the venue's uplink while the
+    // show runs, so this is deliberately a small number.
+    return std::clamp(scopedValue("youtubeMaxConcurrentFetches", 2, false, LocalMode).toInt(), 1, 4);
+}
+
+void Settings::setYoutubeMaxConcurrentFetches(int count)
+{
+    setScopedValue("youtubeMaxConcurrentFetches", std::clamp(count, 1, 4), LocalMode);
+}
+
+bool Settings::youtubeCachedSearchable()
+{
+    return scopedValue("youtubeCachedSearchable", true, false, LocalMode).toBool();
+}
+
+void Settings::setYoutubeCachedSearchable(bool searchable)
+{
+    setScopedValue("youtubeCachedSearchable", searchable, LocalMode);
+}
+
 void Settings::setEmbeddedApiEnabled(bool enabled)
 {
     setScopedValue("embeddedApiEnabled", enabled, LocalMode);

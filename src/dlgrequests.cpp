@@ -632,7 +632,7 @@ std::optional<int> DlgRequests::findSongIdForRequest(const QString &artist, cons
     query.prepare(
             "SELECT songid FROM dbsongs "
             "WHERE artist = :artist AND title = :title "
-            "AND discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
+            "AND discid != '!!DROPPED!!' AND discid != '!!BAD!!' AND discid != '!!YOUTUBE!!' "
             "ORDER BY songid LIMIT 1");
     query.bindValue(":artist", artist);
     query.bindValue(":title", title);
@@ -645,7 +645,7 @@ std::optional<int> DlgRequests::findSongIdForRequest(const QString &artist, cons
             "SELECT songid FROM dbsongs "
             "WHERE lower(trim(artist)) = lower(trim(:artist)) "
             "AND lower(trim(title)) = lower(trim(:title)) "
-            "AND discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
+            "AND discid != '!!DROPPED!!' AND discid != '!!BAD!!' AND discid != '!!YOUTUBE!!' "
             "ORDER BY songid LIMIT 1");
     fallback.bindValue(":artist", artist);
     fallback.bindValue(":title", title);

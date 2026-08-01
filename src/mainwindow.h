@@ -58,6 +58,7 @@
 #include "gainlazyupdater.h"
 #include "dlgvideopreview.h"
 #include "openkjembeddedapi.h"
+#include "youtubefetcher.h"
 #include "src/models/tablemodelhistorysongs.h"
 #include "src/models/tablemodelplaylistsongs.h"
 #include "src/models/tablemodelqueuesongs.h"
@@ -178,7 +179,9 @@ private:
     std::shared_ptr<SongShop> m_songShop;
     std::unique_ptr<UpdateChecker> m_updateChecker;
     OKJSongbookAPI m_songbookApi;
-    OpenKJEmbeddedApi m_embeddedApi{m_rotModel, m_qModel, m_settings, this};
+    // Declared before the API, which holds a reference to it.
+    YoutubeFetcher m_youtubeFetcher{m_settings, this};
+    OpenKJEmbeddedApi m_embeddedApi{m_rotModel, m_qModel, m_karaokeSongsModel, m_youtubeFetcher, m_settings, this};
     QWidget *m_historyTabWidget;
     // Last key the CD+G cue displayed, so a repeated value doesn't re-flash it.
     int m_lastCuedPitch{0};
@@ -217,6 +220,16 @@ public:
 
 private slots:
     void startAutoPlayIfIdle();
+    // Walks the rotation forward from startPosition for the next singer whose next
+    // song can actually be started now, skipping paused singers and songs whose media
+    // isn't on disk yet. Returns false when nobody qualifies, leaving nextSinger
+    // untouched. deferCurrentSinger withholds the current singer's own slot until
+    // everyone else has been checked, which is what stops back-to-back turns under
+    // "current singer on top"; the manual select/play shortcuts pass false because the
+    // KJ asked for a specific action.
+    bool findNextPlayableSinger(int startPosition, bool deferCurrentSinger,
+                                okj::RotationSinger &nextSinger, QString &nextSongPath);
+    [[nodiscard]] QString noSongsToPlayMessage() const;
     void search();
     void databaseUpdated();
     void databaseCleared();
