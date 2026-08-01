@@ -483,6 +483,7 @@ set(SOURCE_FILES
         src/durationlazyupdater.cpp
         src/gainlazyupdater.cpp
         src/youtubefetcher.cpp
+        src/dlgyoutubecache.cpp
         src/idledetect.cpp
         src/mainwindow.h
         src/dlgaddsong.h
@@ -553,6 +554,7 @@ set(SOURCE_FILES
         src/durationlazyupdater.h
         src/gainlazyupdater.h
         src/youtubefetcher.h
+        src/dlgyoutubecache.h
         src/idledetect.h
         src/mainwindow.ui
         src/dlgaddsong.ui

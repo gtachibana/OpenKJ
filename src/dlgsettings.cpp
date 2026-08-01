@@ -39,6 +39,7 @@
 #include <QAuthenticator>
 #include <QKeySequenceEdit>
 #include "audiorecorder.h"
+#include "dlgyoutubecache.h"
 #include <QScreen>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -498,7 +499,17 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
                                          "connection while the show is running."));
     ytLayout->addRow(tr("Simultaneous downloads"), m_spinBoxYtConcurrent);
 
+    auto *manageButton = new QPushButton(tr("Manage downloaded videos..."), m_groupBoxYoutube);
+    ytLayout->addRow(QString(), manageButton);
+
     networkLayout->insertWidget(2, m_groupBoxYoutube);
+
+    connect(manageButton, &QPushButton::clicked, this, [this]() {
+        if (!m_youtubeFetcher)
+            return;
+        DlgYoutubeCache dlg(*m_youtubeFetcher, m_settings, this);
+        dlg.exec();
+    });
 
     connect(m_groupBoxYoutube, &QGroupBox::toggled, this, [this](const bool enabled) {
         m_settings.setYoutubeRequestsEnabled(enabled);

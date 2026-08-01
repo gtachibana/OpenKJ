@@ -125,6 +125,9 @@ void YoutubeFetcher::start() {
     }
     probeAvailability();
     m_sweepTimer.start();
+    // A show that ran without a restart for weeks would otherwise only ever evict on
+    // the back of a new download.
+    runCacheMaintenance();
 }
 
 QString YoutubeFetcher::dlpPath() const {
@@ -412,6 +415,10 @@ void YoutubeFetcher::finishJob(Job *job, const bool ok, const QString &error) {
 
     if (ok) {
         dbSetState(videoId, State::Ready, 100, {});
+        // Runs after the new file is on disk and marked ready, so the cache it is
+        // measuring includes it. The video just fetched is queued unsung, so the
+        // sweeps cannot turn round and delete it.
+        runCacheMaintenance();
     } else {
         QFile::remove(partPathFor(videoId));
         dbSetState(videoId, State::Failed, 0, error);
@@ -557,6 +564,138 @@ bool YoutubeFetcher::isReady(const QString &videoId) const {
     if (status(videoId).state != State::Ready)
         return false;
     return QFileInfo::exists(cachePathFor(videoId));
+}
+
+QVector<YoutubeFetcher::CacheEntry> YoutubeFetcher::cacheEntries() const {
+    QVector<CacheEntry> entries;
+    QSqlQuery query;
+    // Only 'ready' rows have a file. EXISTS rather than a join so a video queued by
+    // two singers still yields one row.
+    if (!query.exec("SELECT f.video_id, d.songid, d.artist, d.title, d.path, "
+                    "COALESCE(d.plays, 0), d.lastplay, "
+                    "EXISTS(SELECT 1 FROM queuesongs q WHERE q.song = d.songid AND q.played = 0) "
+                    "FROM local_youtube_fetches f "
+                    "INNER JOIN dbsongs d ON d.songid = f.songid "
+                    "WHERE f.state = 'ready'")) {
+        return entries;
+    }
+
+    while (query.next()) {
+        CacheEntry entry;
+        entry.videoId = query.value(0).toString();
+        entry.songId = query.value(1).toInt();
+        entry.artist = query.value(2).toString();
+        entry.title = query.value(3).toString();
+        entry.path = query.value(4).toString();
+        entry.plays = query.value(5).toInt();
+        entry.lastPlay = query.value(6).toDateTime();
+        entry.queued = query.value(7).toBool();
+        // A file the KJ deleted by hand reads as zero bytes and sorts to the front of
+        // the eviction sweeps, which is where it belongs.
+        entry.bytes = QFileInfo(entry.path).size();
+        entries.append(entry);
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const CacheEntry &a, const CacheEntry &b) {
+        return a.lastPlay > b.lastPlay;
+    });
+    return entries;
+}
+
+qint64 YoutubeFetcher::cacheBytes() const {
+    qint64 total = 0;
+    for (const auto &entry: cacheEntries())
+        total += entry.bytes;
+    return total;
+}
+
+bool YoutubeFetcher::evict(const QString &videoId, QString *error) {
+    const auto setError = [error](const QString &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+
+    if (m_active.contains(videoId))
+        return setError(tr("That video is downloading right now."));
+
+    QSqlQuery check;
+    check.prepare("SELECT EXISTS(SELECT 1 FROM queuesongs q "
+                  "INNER JOIN local_youtube_fetches f ON f.songid = q.song "
+                  "WHERE f.video_id = :video_id AND q.played = 0)");
+    check.bindValue(":video_id", videoId);
+    if (check.exec() && check.next() && check.value(0).toBool())
+        return setError(tr("That video is in a singer's queue."));
+
+    const QString path = cachePathFor(videoId);
+    if (!path.isEmpty() && QFileInfo::exists(path) && !QFile::remove(path)) {
+        m_logger->error("{} Could not delete cached video {}", m_loggingPrefix, path);
+        return setError(tr("The file could not be deleted. It may be in use."));
+    }
+
+    // Forget the download but keep the dbsongs row: it is referenced elsewhere and it
+    // holds the play counts this policy runs on. Without a fetch row the song reads
+    // as not playable, and a fresh request downloads it again.
+    QSqlQuery remove;
+    remove.prepare("DELETE FROM local_youtube_fetches WHERE video_id = :video_id");
+    remove.bindValue(":video_id", videoId);
+    remove.exec();
+    m_logger->info("{} Evicted cached video {}", m_loggingPrefix, videoId);
+    return true;
+}
+
+int YoutubeFetcher::runCacheMaintenance() {
+    if (!m_settings.youtubeRequestsEnabled())
+        return 0;
+
+    auto entries = cacheEntries();
+    qint64 total = 0;
+    for (const auto &entry: entries)
+        total += entry.bytes;
+
+    const qint64 cap = static_cast<qint64>(m_settings.youtubeCacheMaxGb()) * 1024 * 1024 * 1024;
+    const QDateTime cutoff = QDateTime::currentDateTime().addDays(-m_settings.youtubeCacheKeepDays());
+    int removed = 0;
+
+    const auto drop = [&](const CacheEntry &entry) {
+        if (entry.queued || m_active.contains(entry.videoId))
+            return false;
+        if (!evict(entry.videoId))
+            return false;
+        total -= entry.bytes;
+        removed++;
+        return true;
+    };
+
+    // Age sweep. A video sung once was a one-off request; one sung again has earned
+    // its place and is only ever dropped by the size sweep below. An invalid lastPlay
+    // means it was downloaded and never sung at all.
+    QVector<CacheEntry> survivors;
+    for (const auto &entry: entries) {
+        const bool stale = !entry.lastPlay.isValid() || entry.lastPlay < cutoff;
+        if (entry.plays <= 1 && stale && drop(entry))
+            continue;
+        survivors.append(entry);
+    }
+
+    // Size sweep. This one ignores plays and age - a cap that spares popular videos
+    // is not a cap. Least recently played goes first.
+    if (total > cap) {
+        std::sort(survivors.begin(), survivors.end(), [](const CacheEntry &a, const CacheEntry &b) {
+            return a.lastPlay < b.lastPlay;
+        });
+        for (const auto &entry: survivors) {
+            if (total <= cap)
+                break;
+            drop(entry);
+        }
+    }
+
+    if (removed > 0) {
+        m_logger->info("{} Cache maintenance removed {} video(s), {} MB now in use", m_loggingPrefix, removed,
+                       total / (1024 * 1024));
+    }
+    return removed;
 }
 
 int YoutubeFetcher::pendingCount() const {

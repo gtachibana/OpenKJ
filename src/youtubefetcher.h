@@ -9,6 +9,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QVector>
 #include <spdlog/spdlog.h>
 #include <spdlog/async_logger.h>
 #include <spdlog/fmt/ostr.h>
@@ -55,6 +56,20 @@ public:
         Failed
     };
 
+    // One downloaded video, for the cache manager and the eviction sweeps.
+    struct CacheEntry {
+        QString videoId;
+        int songId{0};
+        QString artist;
+        QString title;
+        QString path;
+        qint64 bytes{0};
+        int plays{0};
+        QDateTime lastPlay;
+        // Queued and unsung. Never evicted - somebody is waiting to sing it.
+        bool queued{false};
+    };
+
     struct Status {
         // False when no one has ever requested this video. Distinct from Pending,
         // which means requested and waiting its turn to download - a caller that
@@ -96,6 +111,21 @@ public:
 
     void enqueue(const QString &videoId, int songId, const QString &requestedBy);
     void cancel(const QString &videoId);
+
+    // Everything currently downloaded, newest play first.
+    [[nodiscard]] QVector<CacheEntry> cacheEntries() const;
+    [[nodiscard]] qint64 cacheBytes() const;
+
+    // Drops one cached video: deletes the file and forgets the download, but leaves
+    // the dbsongs row in place. That row is referenced by favorites, regulars and
+    // queue history, and it carries the play counts the eviction policy reads - so it
+    // stays as a stub, and a later request simply downloads the video again.
+    // Refuses while the video is queued unsung or still downloading.
+    bool evict(const QString &videoId, QString *error = nullptr);
+
+    // Age sweep then, if still over the size cap, a least-recently-played sweep.
+    // Returns how many videos were dropped.
+    int runCacheMaintenance();
 
 signals:
     void fetchProgress(const QString &videoId, int percent);
