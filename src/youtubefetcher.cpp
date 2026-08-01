@@ -68,6 +68,28 @@ bool isValidYoutubeVideoId(const QString &videoId) {
     return re.match(videoId).hasMatch();
 }
 
+bool songPathIsPlayable(const QString &path) {
+    if (path.isEmpty()) {
+        return false;
+    }
+
+    // Returns no rows for anything that isn't a fetched video, which is what makes
+    // this a no-op for the library: one indexed lookup on dbsongs.path and out.
+    QSqlQuery query;
+    query.prepare("SELECT COALESCE(yf.state, '') FROM dbsongs d "
+                  "LEFT JOIN local_youtube_fetches yf ON yf.songid = d.songid "
+                  "WHERE d.path = :path AND d.discid = :discid");
+    query.bindValue(":path", path);
+    query.bindValue(":discid", QString(kYoutubeDiscId));
+    if (!query.exec() || !query.next()) {
+        return true;
+    }
+
+    // The row and the file both have to agree, so a cache the KJ emptied by hand
+    // cannot leave the rotation trying to play something that is gone.
+    return query.value(0).toString() == QLatin1String("ready") && QFileInfo::exists(path);
+}
+
 YoutubeFetcher::YoutubeFetcher(Settings &settings, QObject *parent)
         : QObject(parent), m_settings(settings) {
     m_logger = spdlog::get("logger");
@@ -501,6 +523,15 @@ bool YoutubeFetcher::isReady(const QString &videoId) const {
     if (status(videoId).state != State::Ready)
         return false;
     return QFileInfo::exists(cachePathFor(videoId));
+}
+
+int YoutubeFetcher::pendingCount() const {
+    QSqlQuery query;
+    if (query.exec("SELECT COUNT(1) FROM local_youtube_fetches WHERE state IN ('pending', 'fetching')") &&
+        query.next()) {
+        return query.value(0).toInt();
+    }
+    return 0;
 }
 
 void YoutubeFetcher::dbUpsert(const QString &videoId, const int songId, const QString &requestedBy) {

@@ -220,6 +220,16 @@ public:
 
 private slots:
     void startAutoPlayIfIdle();
+    // Walks the rotation forward from startPosition for the next singer whose next
+    // song can actually be started now, skipping paused singers and songs whose media
+    // isn't on disk yet. Returns false when nobody qualifies, leaving nextSinger
+    // untouched. deferCurrentSinger withholds the current singer's own slot until
+    // everyone else has been checked, which is what stops back-to-back turns under
+    // "current singer on top"; the manual select/play shortcuts pass false because the
+    // KJ asked for a specific action.
+    bool findNextPlayableSinger(int startPosition, bool deferCurrentSinger,
+                                okj::RotationSinger &nextSinger, QString &nextSongPath);
+    [[nodiscard]] QString noSongsToPlayMessage() const;
     void search();
     void databaseUpdated();
     void databaseCleared();

@@ -27,6 +27,18 @@ inline constexpr auto kYoutubeDiscId = "!!YOUTUBE!!";
 // base64url; nothing else is accepted, in particular no dots or separators.
 bool isValidYoutubeVideoId(const QString &videoId);
 
+// Whether a queued song can be started right now.
+//
+// True for every ordinary library song, including one whose file has gone missing -
+// that is a different failure with its own handling at play time, and changing it
+// here would quietly alter how the rotation treats a slow network share.
+//
+// False only for a video whose download has not finished. Callers walking the
+// rotation use this to pass over a singer rather than stall the show or burn their
+// turn on a file that isn't there yet; the request stays queued and comes back
+// around on the next pass.
+bool songPathIsPlayable(const QString &path);
+
 // Downloads requested YouTube videos to a local cache with yt-dlp, one QProcess per
 // job, so the rest of the app only ever deals with a normal file on disk.
 //
@@ -70,6 +82,9 @@ public:
     [[nodiscard]] QString cachePathFor(const QString &videoId) const;
     [[nodiscard]] Status status(const QString &videoId) const;
     [[nodiscard]] bool isReady(const QString &videoId) const;
+    // Requests still waiting on a download. Lets the KJ be told the rotation is
+    // waiting on a fetch rather than the flatly wrong "no unsung songs are queued".
+    [[nodiscard]] int pendingCount() const;
 
     void enqueue(const QString &videoId, int songId, const QString &requestedBy);
     void cancel(const QString &videoId);
