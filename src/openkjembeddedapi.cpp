@@ -112,14 +112,26 @@ QJsonArray strippedEntries(const QJsonArray &entries)
 
 OpenKJEmbeddedApi::OpenKJEmbeddedApi(TableModelRotation &rotationModel,
                                      TableModelQueueSongs &queueModel,
+                                     TableModelKaraokeSongs &karaokeSongsModel,
+                                     YoutubeFetcher &youtubeFetcher,
                                      Settings &settings,
                                      QObject *parent)
     : QObject(parent),
       m_rotationModel(rotationModel),
       m_queueModel(queueModel),
+      m_karaokeSongsModel(karaokeSongsModel),
+      m_youtubeFetcher(youtubeFetcher),
       m_settings(settings)
 {
     connect(&m_server, &QTcpServer::newConnection, this, &OpenKJEmbeddedApi::onNewConnection);
+
+    // Download progress is the one queue change nothing else signals, so without this
+    // a phone watching a fetch would sit on a stale percentage until some unrelated
+    // edit happened to push a snapshot. Coalesced like every other trigger.
+    connect(&m_youtubeFetcher, &YoutubeFetcher::fetchProgress,
+            this, [this](const QString &, int) { scheduleSseBroadcast(); });
+    connect(&m_youtubeFetcher, &YoutubeFetcher::fetchFinished,
+            this, [this](const QString &, int, bool, const QString &) { scheduleSseBroadcast(); });
 
     // Rotation edits arrive in bursts (a drag reorder emits per row), so coalesce
     // them into one snapshot instead of pushing a frame per signal.
@@ -714,7 +726,8 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
 
     if (request.method == "GET" && cleanPath == "/stats") {
         QSqlQuery query;
-        query.exec("SELECT COUNT(1) FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!'");
+        query.exec("SELECT COUNT(1) FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
+                   "AND discid != '!!YOUTUBE!!'");
         int songCount = 0;
         if (query.next()) {
             songCount = query.value(0).toInt();
@@ -788,6 +801,7 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
         QSqlQuery query;
         query.prepare(QString("SELECT songid, artist, title, COALESCE(duration, 0) FROM dbsongs "
                               "WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
+                              "AND discid != '!!YOUTUBE!!' "
                               "AND %1 LIKE :prefix "
                               "ORDER BY %1, %2 LIMIT :limit").arg(primary, secondary));
         query.bindValue(":prefix", letter + "%");
@@ -985,8 +999,12 @@ QJsonObject OpenKJEmbeddedApi::commandSearch(const QJsonObject &payload)
     QStringList terms = searchString.split(' ', Qt::SkipEmptyParts);
     QSqlQuery query;
 
+    // Cached YouTube videos stay out of the library catalog: they are a per-request
+    // side effect, not part of the KJ's curated collection, and they reach singers
+    // through YouTube search plus the "already cached" badge instead.
     QString sql = "SELECT songid, artist, title, COALESCE(duration, 0) FROM dbsongs "
-                  "WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' ";
+                  "WHERE discid != '!!DROPPED!!' AND discid != '!!BAD!!' "
+                  "AND discid != '!!YOUTUBE!!' ";
     if (!terms.isEmpty()) {
         // No lower() on the column: SQLite's LIKE is already case-insensitive for ASCII
         // (and its lower() only folds ASCII anyway), so the wrapper only cost a function
@@ -1122,10 +1140,11 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
     QSqlQuery query;
     query.prepare(
         "SELECT qs.qsongid, rs.name, d.songid, d.artist, d.title, COALESCE(d.duration, 0), qs.keychg, "
-        "COALESCE(rs.paused, 0), rs.position "
+        "COALESCE(rs.paused, 0), rs.position, yf.state, COALESCE(yf.progress, 0) "
         "FROM queuesongs qs "
         "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
         "INNER JOIN dbsongs d ON d.songid = qs.song "
+        "LEFT JOIN local_youtube_fetches yf ON yf.songid = d.songid "
         "WHERE qs.played = 0 AND qs.singer != :nowSinger "
         "ORDER BY rs.position ASC, qs.position ASC");
     query.bindValue(":nowSinger", nowSingerId);
@@ -1146,6 +1165,12 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
             request.insert("turns_until", m_rotationModel.positionTurnDistance(singerPosition));
             request.insert("wait_seconds", m_rotationModel.positionWaitTime(singerPosition));
             request.insert("request_time", QDateTime::currentSecsSinceEpoch());
+            // Absent for library songs, so a client that knows nothing about this sees
+            // exactly what it saw before.
+            if (const QString mediaState = query.value(9).toString(); !mediaState.isEmpty()) {
+                request.insert("media_state", mediaState);
+                request.insert("media_progress", query.value(10).toInt());
+            }
             requests.append(request);
         }
     }
@@ -1156,10 +1181,11 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
         QSqlQuery remainingQuery;
         remainingQuery.prepare(
             "SELECT qs.qsongid, rs.name, d.songid, d.artist, d.title, COALESCE(d.duration, 0), qs.keychg, "
-            "COALESCE(rs.paused, 0) "
+            "COALESCE(rs.paused, 0), yf.state, COALESCE(yf.progress, 0) "
             "FROM queuesongs qs "
             "INNER JOIN rotationsingers rs ON rs.singerid = qs.singer "
             "INNER JOIN dbsongs d ON d.songid = qs.song "
+            "LEFT JOIN local_youtube_fetches yf ON yf.songid = d.songid "
             "WHERE qs.played = 0 AND qs.singer = :singerId AND qs.qsongid != :nowPlayingId "
             "ORDER BY qs.position ASC");
         remainingQuery.bindValue(":singerId", nowSingerId);
@@ -1180,6 +1206,10 @@ QJsonObject OpenKJEmbeddedApi::commandGetRequests()
                 request.insert("turns_until", 0);
                 request.insert("wait_seconds", 0);
                 request.insert("request_time", QDateTime::currentSecsSinceEpoch());
+                if (const QString mediaState = remainingQuery.value(8).toString(); !mediaState.isEmpty()) {
+                    request.insert("media_state", mediaState);
+                    request.insert("media_progress", remainingQuery.value(9).toInt());
+                }
                 requests.append(request);
             }
         }
@@ -1406,6 +1436,12 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiPost(const QString &path, const QJso
     }
     if (path == "/local/request") {
         return jsonResponse(200, requestSongFromLocalUser(payload));
+    }
+    if (path == "/local/request/youtube") {
+        return jsonResponse(200, requestYoutubeVideo(payload));
+    }
+    if (path == "/local/youtube/cached") {
+        return jsonResponse(200, youtubeCachedStatus(payload));
     }
     if (path == "/local/request/remove") {
         return jsonResponse(200, removeOwnRequest(payload));
@@ -1736,6 +1772,18 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         // running tally comes back on the "cheer" event and in now_playing.cheers.
         {"supportsCheers", m_settings.cheersEnabled()},
         {"cheerEventName", "cheer"},
+        // Gated on the fetcher actually working, not just on the setting, so a broken
+        // or missing yt-dlp takes the feature off the phones instead of leaving a
+        // search box whose every result fails to queue. Clients search YouTube
+        // themselves and POST the result to /local/request/youtube; batch-check
+        // youtubeCachedCheckPath to badge results that are already downloaded.
+        {"supportsYoutubeRequests", m_settings.youtubeRequestsEnabled() && m_youtubeFetcher.isAvailable()},
+        {"youtubeRequestPath", "/local/request/youtube"},
+        {"youtubeCachedCheckPath", "/local/youtube/cached"},
+        {"youtubeMaxDurationSecs", m_settings.youtubeMaxDurationSecs()},
+        // Queue entries backed by a video carry media_state (ready|pending|fetching|
+        // failed) and media_progress. The keys are absent on library songs.
+        {"supportsQueueMediaState", true},
         {"cheerReactions", QJsonArray::fromStringList(cheerReactions())}
     };
 }
@@ -2908,6 +2956,133 @@ QJsonObject OpenKJEmbeddedApi::requestSongFromLocalUser(const QJsonObject &paylo
     }
 
     return QJsonObject{{"ok", false}, {"error", response.value("errorString").toString("Could not queue song")}};
+}
+
+int OpenKJEmbeddedApi::ensureYoutubeSongRow(const QString &videoId, const QString &artist, const QString &title,
+                                            const int durationSeconds)
+{
+    const QString path = m_youtubeFetcher.cachePathFor(videoId);
+    if (path.isEmpty()) {
+        return -1;
+    }
+
+    // addSong() returns the existing songid when the path is already known, which is
+    // what makes a second request for the same video a cache hit rather than a
+    // duplicate row - dbsongs.path is UNIQUE and doubles as the cache index.
+    okj::KaraokeSong song{
+            -1,
+            artist,
+            artist.toLower(),
+            title,
+            title.toLower(),
+            kYoutubeDiscId,
+            QString(kYoutubeDiscId).toLower(),
+            durationSeconds * 1000,
+            videoId + ".mp4",
+            path,
+            artist + " " + title,
+            0,
+            QDateTime()
+    };
+    return m_karaokeSongsModel.addSong(song);
+}
+
+QJsonObject OpenKJEmbeddedApi::requestYoutubeVideo(const QJsonObject &payload)
+{
+    QString normalized;
+    QString username;
+    if (!isValidUserSession(payload.value("token").toString().trimmed(), &normalized, &username)) {
+        return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
+    }
+
+    if (!m_settings.youtubeRequestsEnabled()) {
+        return QJsonObject{{"ok", false}, {"error", "YouTube requests are not enabled"}};
+    }
+    if (!m_youtubeFetcher.isAvailable()) {
+        return QJsonObject{{"ok", false}, {"error", "YouTube requests are temporarily unavailable"}};
+    }
+    if (!isAccepting()) {
+        return QJsonObject{{"ok", false}, {"error", "Requests not accepted"}};
+    }
+
+    const QString videoId = payload.value("videoId").toString().trimmed();
+    if (!isValidYoutubeVideoId(videoId)) {
+        return QJsonObject{{"ok", false}, {"error", "That doesn't look like a YouTube video"}};
+    }
+
+    const QString title = payload.value("title").toString().trimmed();
+    if (title.isEmpty()) {
+        return QJsonObject{{"ok", false}, {"error", "Missing title"}};
+    }
+    const QString artist = payload.value("artist").toString().trimmed();
+
+    // Rejected up front rather than after a long download: an hour-long "top 100
+    // karaoke hits" upload would eat the cache and the singer's whole turn. The value
+    // is the client's, so it is only trusted to refuse - the real duration is read off
+    // the file once it lands and overwrites this.
+    const int durationSeconds = payload.value("durationSeconds").toInt();
+    const int maxDuration = m_settings.youtubeMaxDurationSecs();
+    if (durationSeconds > maxDuration) {
+        return QJsonObject{{"ok", false},
+                           {"error", QString("That video is longer than the %1 minute limit")
+                                   .arg(maxDuration / 60)}};
+    }
+
+    const int songId = ensureYoutubeSongRow(videoId, artist.isEmpty() ? QStringLiteral("YouTube") : artist,
+                                            title, std::max(0, durationSeconds));
+    if (songId < 1) {
+        return QJsonObject{{"ok", false}, {"error", "Could not add that video"}};
+    }
+
+    QJsonObject requestPayload;
+    requestPayload.insert("token", payload.value("token"));
+    requestPayload.insert("songId", songId);
+    const QJsonObject response = requestSongFromLocalUser(requestPayload);
+    if (!response.value("ok").toBool()) {
+        return response;
+    }
+
+    // Started only after the request is safely in the queue, so a duplicate-song
+    // rejection doesn't kick off a download nobody asked for.
+    m_youtubeFetcher.enqueue(videoId, songId, normalized);
+
+    const auto status = m_youtubeFetcher.status(videoId);
+    QJsonObject out{{"ok", true}, {"song_id", songId}};
+    out.insert("media_state", m_youtubeFetcher.isReady(videoId) ? "ready" : "pending");
+    out.insert("media_progress", status.progress);
+    return out;
+}
+
+QJsonObject OpenKJEmbeddedApi::youtubeCachedStatus(const QJsonObject &payload)
+{
+    const QJsonArray videoIds = payload.value("videoIds").toArray();
+    QJsonArray ready;
+    QJsonArray pending;
+    // Bounded so a client cannot turn one request into an unbounded pile of stat()
+    // calls on the main thread.
+    int checked = 0;
+    for (const auto &value: videoIds) {
+        if (++checked > 50) {
+            break;
+        }
+        const QString videoId = value.toString().trimmed();
+        if (!isValidYoutubeVideoId(videoId)) {
+            continue;
+        }
+        if (m_youtubeFetcher.isReady(videoId)) {
+            ready.append(videoId);
+            continue;
+        }
+        // A video nobody has requested is neither - it just isn't listed, and the
+        // frontend shows it as a normal result with a wait.
+        if (const auto status = m_youtubeFetcher.status(videoId);
+                status.known && (status.state == YoutubeFetcher::State::Fetching ||
+                                 status.state == YoutubeFetcher::State::Pending)) {
+            pending.append(videoId);
+        }
+    }
+
+    return QJsonObject{{"ok", true}, {"ready", ready}, {"pending", pending}};
 }
 
 QJsonObject OpenKJEmbeddedApi::removeOwnRequest(const QJsonObject &payload)

@@ -862,6 +862,9 @@ MainWindow::MainWindow(QWidget *parent) :
                            m_settings.embeddedApiBindAddress().toStdString(),
                            m_settings.embeddedApiPort());
         }
+        // Probes yt-dlp and picks up anything a previous run left unfinished. Both are
+        // asynchronous - nothing here delays getting the window on screen.
+        m_youtubeFetcher.start();
     }
 
     m_timerSlowUiUpdate.start(10000);
@@ -2052,6 +2055,7 @@ void MainWindow::actionSettingsTriggered() {
         if (mode == Settings::LocalMode && m_settings.embeddedApiEnabled()) {
             m_embeddedApi.start(static_cast<quint16>(m_settings.embeddedApiPort()),
                                 QHostAddress(m_settings.embeddedApiBindAddress()));
+            m_youtubeFetcher.start();
         }
     });
     connect(settingsDialog, &DlgSettings::rotationShowNextSongChanged, [&]() { autosizeRotationCols(); });

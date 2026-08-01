@@ -488,6 +488,7 @@ YoutubeFetcher::Status YoutubeFetcher::status(const QString &videoId) const {
         return {};
 
     Status status;
+    status.known = true;
     status.state = stateFromString(query.value(0).toString());
     status.progress = query.value(1).toInt();
     status.error = query.value(2).toString();

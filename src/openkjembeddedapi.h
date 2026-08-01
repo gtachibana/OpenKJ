@@ -12,7 +12,9 @@
 #include <QUrlQuery>
 #include "models/tablemodelrotation.h"
 #include "models/tablemodelqueuesongs.h"
+#include "models/tablemodelkaraokesongs.h"
 #include "settings.h"
+#include "youtubefetcher.h"
 
 class OpenKJEmbeddedApi : public QObject
 {
@@ -21,6 +23,8 @@ class OpenKJEmbeddedApi : public QObject
 public:
     explicit OpenKJEmbeddedApi(TableModelRotation &rotationModel,
                                TableModelQueueSongs &queueModel,
+                               TableModelKaraokeSongs &karaokeSongsModel,
+                               YoutubeFetcher &youtubeFetcher,
                                Settings &settings,
                                QObject *parent = nullptr);
 
@@ -123,6 +127,11 @@ private:
     QHash<QTcpSocket *, Connection> m_connections;
     TableModelRotation &m_rotationModel;
     TableModelQueueSongs &m_queueModel;
+    // Needed to create the dbsongs row a YouTube request queues against. Going
+    // through the model rather than raw SQL keeps its in-memory song cache in step,
+    // which is what getIdForPath() - and therefore play-time history - relies on.
+    TableModelKaraokeSongs &m_karaokeSongsModel;
+    YoutubeFetcher &m_youtubeFetcher;
     Settings &m_settings;
 
     // Sockets parked on GET /local/events. They never get a Content-Length or a
@@ -274,6 +283,20 @@ private:
     QJsonObject logoutAdmin(const QJsonObject &payload);
     QJsonObject currentAdmin(const QUrlQuery &query);
     QJsonObject requestSongFromLocalUser(const QJsonObject &payload);
+    // Queues a video the singer found on YouTube. The frontend searches YouTube
+    // itself and posts the result here; all this side needs is enough metadata to
+    // show the request in the rotation while the media is fetched in the background.
+    QJsonObject requestYoutubeVideo(const QJsonObject &payload);
+    // Tells the frontend which of a batch of search results are already cached, so it
+    // can badge them as playable with no wait. Dedupe is per video id and there are
+    // dozens of karaoke uploads per song, so steering singers onto copies already on
+    // disk is what makes the cache worth having.
+    QJsonObject youtubeCachedStatus(const QJsonObject &payload);
+    // Finds or creates the dbsongs row backing a video. Returns -1 if the row could
+    // not be created. The path is the fetcher's deterministic cache path, so the row
+    // is valid before the file exists.
+    int ensureYoutubeSongRow(const QString &videoId, const QString &artist, const QString &title,
+                             int durationSeconds);
     QJsonObject removeOwnRequest(const QJsonObject &payload);
     QJsonObject moveOwnRequest(const QJsonObject &payload);
     QJsonObject setOwnAway(const QJsonObject &payload);

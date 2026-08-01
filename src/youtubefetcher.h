@@ -44,6 +44,10 @@ public:
     };
 
     struct Status {
+        // False when no one has ever requested this video. Distinct from Pending,
+        // which means requested and waiting its turn to download - a caller that
+        // conflates the two tells singers a video is downloading when nothing is.
+        bool known{false};
         State state{State::Pending};
         int progress{0};
         QString error;
