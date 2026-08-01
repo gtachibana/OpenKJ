@@ -2026,6 +2026,7 @@ void MainWindow::actionImportRegularsTriggered() {
 void MainWindow::actionSettingsTriggered() {
     auto settingsDialog = new DlgSettings(m_mediaBackendKar, m_mediaBackendBm, m_songbookApi, this);
     settingsDialog->setModal(true);
+    settingsDialog->setYoutubeFetcher(&m_youtubeFetcher);
 
     connect(settingsDialog, &DlgSettings::videoOffsetChanged, [&](auto offsetMs) {
         m_mediaBackendKar.setVideoOffset(offsetMs);

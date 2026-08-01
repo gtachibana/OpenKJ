@@ -116,6 +116,10 @@ YoutubeFetcher::~YoutubeFetcher() {
 void YoutubeFetcher::start() {
     if (!m_settings.youtubeRequestsEnabled()) {
         m_logger->info("{} YouTube requests are disabled, not starting", m_loggingPrefix);
+        // Also covers the KJ switching the feature off from settings: nothing new is
+        // dispatched and the timeout sweep stops. Downloads already running are left
+        // to finish, since their rows are already queued against a singer.
+        m_sweepTimer.stop();
         setAvailable(false);
         return;
     }
@@ -155,12 +159,17 @@ void YoutubeFetcher::setAvailable(const bool available) {
     emit availabilityChanged(available);
 }
 
+void YoutubeFetcher::refreshAvailability() {
+    probeAvailability();
+}
+
 void YoutubeFetcher::probeAvailability() {
     if (m_versionProcess)
         return;
     const QString path = dlpPath();
     if (!QFileInfo::exists(path)) {
         m_logger->warn("{} yt-dlp not found at: {}", m_loggingPrefix, path);
+        m_version.clear();
         setAvailable(false);
         return;
     }
@@ -169,6 +178,7 @@ void YoutubeFetcher::probeAvailability() {
     connect(m_versionProcess, &QProcess::finished, this, [this](const int exitCode, QProcess::ExitStatus) {
         const QString version = QString::fromUtf8(m_versionProcess->readAllStandardOutput()).trimmed();
         const bool ok = exitCode == 0 && !version.isEmpty();
+        m_version = ok ? version : QString();
         if (ok)
             m_logger->info("{} yt-dlp version: {}", m_loggingPrefix, version);
         else
@@ -438,19 +448,42 @@ void YoutubeFetcher::maybeSelfUpdate(const QString &stderrTail) {
     if (m_lastUpdateAttempt.isValid() && m_lastUpdateAttempt.secsTo(QDateTime::currentDateTime()) < kUpdateCooldownSecs)
         return;
 
-    m_lastUpdateAttempt = QDateTime::currentDateTime();
     m_logger->info("{} Fetch failure looks like extractor breakage, updating yt-dlp", m_loggingPrefix);
+    runUpdate();
+}
+
+void YoutubeFetcher::updateNow() {
+    if (m_updateProcess) {
+        return;
+    }
+    m_logger->info("{} Operator requested a yt-dlp update", m_loggingPrefix);
+    runUpdate();
+}
+
+void YoutubeFetcher::runUpdate() {
+    m_lastUpdateAttempt = QDateTime::currentDateTime();
 
     m_updateProcess = new QProcess(this);
     connect(m_updateProcess, &QProcess::finished, this, [this](const int exitCode, QProcess::ExitStatus) {
         const QString out = QString::fromUtf8(m_updateProcess->readAllStandardOutput()).trimmed();
+        const QString err = QString::fromUtf8(m_updateProcess->readAllStandardError()).trimmed();
         m_updateProcess->deleteLater();
         m_updateProcess = nullptr;
         if (exitCode != 0) {
             m_logger->error("{} yt-dlp self-update failed with exit code {}", m_loggingPrefix, exitCode);
+            // Overwhelmingly the cause on Windows: yt-dlp replaces its own executable,
+            // which it cannot do from a directory the user has no write access to.
+            emit updateFinished(false, err.isEmpty()
+                                       ? tr("The update failed. If yt-dlp lives somewhere write-protected, "
+                                            "move it to a folder you own and try again.")
+                                       : err.section('\n', -1));
             return;
         }
         m_logger->info("{} yt-dlp self-update finished: {}", m_loggingPrefix, out);
+        emit updateFinished(true, out.isEmpty() ? tr("yt-dlp is up to date.") : out.section('\n', -1));
+        // Picks up the new version string, and re-enables the feature if the previous
+        // binary was too broken to answer --version.
+        refreshAvailability();
         requeueAfterUpdate();
     });
     connect(m_updateProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
@@ -459,6 +492,7 @@ void YoutubeFetcher::maybeSelfUpdate(const QString &stderrTail) {
             m_updateProcess->deleteLater();
             m_updateProcess = nullptr;
         }
+        emit updateFinished(false, tr("Could not run yt-dlp. Check the path in settings."));
     });
     m_updateProcess->start(dlpPath(), {QStringLiteral("--update-to"), m_settings.youtubeDlpChannel()});
 }

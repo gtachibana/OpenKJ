@@ -85,6 +85,14 @@ public:
     // Requests still waiting on a download. Lets the KJ be told the rotation is
     // waiting on a fetch rather than the flatly wrong "no unsung songs are queued".
     [[nodiscard]] int pendingCount() const;
+    // Version string from the last successful probe, empty if yt-dlp never answered.
+    [[nodiscard]] QString version() const { return m_version; }
+    // Re-probes yt-dlp. For the settings dialog, after the KJ edits the path.
+    void refreshAvailability();
+    // Operator-initiated update, distinct from the automatic one that follows a
+    // suspected extractor breakage: it ignores the hourly cooldown, because someone
+    // is standing there having asked for it.
+    void updateNow();
 
     void enqueue(const QString &videoId, int songId, const QString &requestedBy);
     void cancel(const QString &videoId);
@@ -93,6 +101,9 @@ signals:
     void fetchProgress(const QString &videoId, int percent);
     void fetchFinished(const QString &videoId, int songId, bool ok, const QString &error);
     void availabilityChanged(bool available);
+    // Outcome of an update attempt, so the settings dialog can report it. Also fires
+    // for the automatic post-breakage update, which is worth surfacing.
+    void updateFinished(bool ok, const QString &message);
 
 private slots:
     // Connected to every fetch process. The job is recovered from the sender's
@@ -120,6 +131,7 @@ private:
     std::shared_ptr<spdlog::logger> m_logger;
 
     bool m_available{false};
+    QString m_version;
     QQueue<QString> m_queued;
     QHash<QString, Job *> m_active;
     QProcess *m_versionProcess{nullptr};
@@ -148,6 +160,7 @@ private:
     void parseProgress(Job *job, const QString &line);
     void sweepTimeouts();
     void maybeSelfUpdate(const QString &stderrTail);
+    void runUpdate();
     void requeueAfterUpdate();
 
     // Persistence. local_youtube_fetches is the source of truth across restarts; the

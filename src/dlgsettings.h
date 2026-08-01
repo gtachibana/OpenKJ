@@ -30,6 +30,9 @@
 #include <QGroupBox>
 #include <QLineEdit>
 #include <QSpinBox>
+#include <QLabel>
+#include <QVBoxLayout>
+#include "youtubefetcher.h"
 #include "settings.h"
 #include "mediabackend.h"
 #include "okjsongbookapi.h"
@@ -63,7 +66,27 @@ private:
     QLineEdit *m_lineEditEmbeddedBindAddress{nullptr};
     QSpinBox *m_spinBoxEmbeddedPort{nullptr};
     QSpinBox *m_spinBoxUpNextTurns{nullptr};
+    QGroupBox *m_groupBoxYoutube{nullptr};
+    QLineEdit *m_lineEditDlpPath{nullptr};
+    QLabel *m_labelDlpStatus{nullptr};
+    QPushButton *m_buttonDlpUpdate{nullptr};
+    QComboBox *m_comboDlpChannel{nullptr};
+    QLineEdit *m_lineEditYtCacheDir{nullptr};
+    QLabel *m_labelYtCacheWarning{nullptr};
+    QSpinBox *m_spinBoxYtMaxDuration{nullptr};
+    QSpinBox *m_spinBoxYtMaxHeight{nullptr};
+    QSpinBox *m_spinBoxYtCacheMaxGb{nullptr};
+    QSpinBox *m_spinBoxYtKeepDays{nullptr};
+    QSpinBox *m_spinBoxYtConcurrent{nullptr};
+    // Not owned. Null when the dialog is used without one, which keeps the YouTube
+    // group inert rather than crashing.
+    YoutubeFetcher *m_youtubeFetcher{nullptr};
     void setupModeWidgets();
+    void setupYoutubeWidgets(QVBoxLayout *networkLayout);
+    void refreshDlpStatusLabel();
+    // Warns when the cache sits inside a library source dir. There it would be swept
+    // up by a library scan and offered for deletion as a pile of missing files.
+    void refreshYtCacheWarning();
     void refreshNetworkModeUi();
     void setupHotkeysForm();
     struct KeyboardShortcut
@@ -77,6 +100,9 @@ private:
 public:
     explicit DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBackend, OKJSongbookAPI &songbookAPI,
                          QWidget *parent = nullptr);
+    // Wires the YouTube group to the running fetcher so it can show the yt-dlp
+    // version and drive a manual update. Call before the dialog is shown.
+    void setYoutubeFetcher(YoutubeFetcher *fetcher);
     ~DlgSettings() override;
 
 signals:

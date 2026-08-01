@@ -80,6 +80,9 @@ private:
     int m_itemHeight{20};
 
     [[nodiscard]] QVariant getItemDisplayRoleData(const QModelIndex &index) const;
+    // Explains why a song is not playable yet. Empty for library songs and for videos
+    // already downloaded, which leaves those rows with no tooltip as before.
+    [[nodiscard]] QVariant getMediaStateTooltip(int row) const;
     [[nodiscard]] static QVariant getColumnTextAlignmentRoleData(int column);
     [[nodiscard]] static QString getColumnName(int section);
     [[nodiscard]] QSize getColumnSizeHint(int section) const;

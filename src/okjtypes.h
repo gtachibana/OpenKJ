@@ -113,6 +113,11 @@ namespace okj {
         QString songId;
         int duration{0};
         QString path;
+        // Empty for ordinary library songs. For one requested from YouTube: pending,
+        // fetching, ready or failed. Carried on the row rather than looked up on
+        // demand because data() is called for every cell on every repaint.
+        QString mediaState;
+        int mediaProgress{0};
     };
 
     struct HistorySong {

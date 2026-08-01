@@ -75,7 +75,18 @@ QVariant TableModelQueueSongs::data(const QModelIndex &index, int role) const {
         case Qt::ForegroundRole:
             if (m_songs.at(index.row()).played)
                 return QColor("darkGrey");
+            // A song the rotation will pass over should not look like every other one
+            // in the list - the KJ needs to see why a singer got skipped without
+            // hunting for it.
+            if (const auto &song = m_songs.at(index.row()); !song.mediaState.isEmpty()) {
+                if (song.mediaState == QLatin1String("failed"))
+                    return QColor("firebrick");
+                if (song.mediaState != QLatin1String("ready"))
+                    return QColor("darkOrange");
+            }
             return {};
+        case Qt::ToolTipRole:
+            return getMediaStateTooltip(index.row());
         case Qt::TextAlignmentRole:
             return getColumnTextAlignmentRoleData(index.column());
         case Qt::UserRole: {
@@ -88,6 +99,18 @@ QVariant TableModelQueueSongs::data(const QModelIndex &index, int role) const {
         default:
             return {};
     }
+}
+
+QVariant TableModelQueueSongs::getMediaStateTooltip(const int row) const {
+    const auto &song = m_songs.at(row);
+    if (song.mediaState.isEmpty() || song.mediaState == QLatin1String("ready"))
+        return {};
+    if (song.mediaState == QLatin1String("failed"))
+        return tr("This song was requested from YouTube and could not be downloaded.\n"
+                  "The singer will be passed over until it is removed or requested again.");
+    return tr("Downloading from YouTube (%1%).\n"
+              "The singer keeps their place and will be passed over until it finishes.")
+            .arg(song.mediaProgress);
 }
 
 QVariant TableModelQueueSongs::getColumnTextAlignmentRoleData(int column) {
@@ -142,9 +165,12 @@ void TableModelQueueSongs::loadSinger(const int singerId) {
     QSqlQuery query;
     query.prepare("SELECT queuesongs.qsongid, queuesongs.singer, queuesongs.song, queuesongs.played, "
                   "queuesongs.keychg, queuesongs.position, rotationsingers.name, dbsongs.artist, "
-                  "dbsongs.title, dbsongs.discid, dbsongs.duration, dbsongs.path FROM queuesongs "
+                  "dbsongs.title, dbsongs.discid, dbsongs.duration, dbsongs.path, "
+                  "COALESCE(yf.state, ''), COALESCE(yf.progress, 0) FROM queuesongs "
                   "INNER JOIN rotationsingers ON rotationsingers.singerid = queuesongs.singer "
-                  "INNER JOIN dbsongs ON dbsongs.songid = queuesongs.song WHERE queuesongs.singer = :singerId "
+                  "INNER JOIN dbsongs ON dbsongs.songid = queuesongs.song "
+                  "LEFT JOIN local_youtube_fetches yf ON yf.songid = dbsongs.songid "
+                  "WHERE queuesongs.singer = :singerId "
                   "ORDER BY queuesongs.position");
     query.bindValue(":singerId", singerId);
     query.exec();
@@ -164,7 +190,9 @@ void TableModelQueueSongs::loadSinger(const int singerId) {
                 query.value(8).toString(),
                 query.value(9).toString(),
                 query.value(10).toInt(),
-                query.value(11).toString()
+                query.value(11).toString(),
+                query.value(12).toString(),
+                query.value(13).toInt()
         });
     }
     emit layoutChanged();
