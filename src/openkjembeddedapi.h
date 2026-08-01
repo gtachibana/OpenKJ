@@ -37,6 +37,13 @@ public:
     [[nodiscard]] bool localUserExists(const QString &username) const;
     bool renameLocalUser(const QString &currentUsername, const QString &nextUsername, QString *error = nullptr);
 
+    // The only way back into an account whose password has been forgotten. Passwords
+    // are salted PBKDF2, so nothing can recover the old one, and there is no email or
+    // phone number on file to send a reset link to - but the KJ is standing in the
+    // room with the singer, which is a better second factor than either. Ends the
+    // account's existing sessions, so it doubles as the way to revoke a phone.
+    bool resetLocalUserPassword(const QString &username, const QString &newPassword, QString *error = nullptr);
+
 public slots:
     // Keeps the API's idea of the current key in step with the pipeline. Needed
     // because queuesongs.keychg is not authoritative while a song plays - the KJ can

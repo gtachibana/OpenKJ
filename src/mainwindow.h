@@ -197,6 +197,10 @@ private:
     // singer's phone looking up a name that no longer exists. Returns false when the
     // rename should be abandoned - the KJ has already been told why.
     bool renameLocalUserForSinger(const QString &currentName, const QString &newName);
+    // Sets a new phone password for the right-clicked singer. There is no self-service
+    // reset - passwords are one-way hashed and no contact details are on file - so this
+    // is the only route back into an account.
+    void resetSingerPassword();
     void setupShortcuts();
     void setupConnections();
     void loadSettings();

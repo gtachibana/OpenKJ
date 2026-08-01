@@ -65,6 +65,9 @@ private slots:
     void on_tableViewRegulars_clicked(const QModelIndex &index);
     void on_tableViewRegulars_customContextMenuRequested(const QPoint &pos);
     void renameHistorySinger();
+    // Sets a new phone password for the right-clicked regular. Offered here as well as
+    // from the rotation because a locked-out singer usually isn't in the rotation yet.
+    void resetSingerPassword();
     void on_lineEditSearch_textChanged(const QString &arg1);
     void on_tableViewRegulars_doubleClicked(const QModelIndex &index);
 
