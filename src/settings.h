@@ -290,6 +290,38 @@ public:
     void setEmbeddedApiPort(int port);
     void setEmbeddedApiBindAddress(const QString &address);
     void setEmbeddedApiUpNextTurns(int turns);
+    // Lets singers request a song off YouTube from their phone. Off by default: it
+    // needs yt-dlp present, it downloads media to disk, and whether that is
+    // acceptable is the KJ's call, not ours. The embedded API reports it as a
+    // capability, so turning it off takes the feature off the phones too.
+    bool youtubeRequestsEnabled();
+    void setYoutubeRequestsEnabled(bool enabled);
+    // Where fetched videos are cached. Must not sit inside a library source dir -
+    // DbUpdater only enumerates dbsongs rows under source dirs, so keeping the cache
+    // outside them is what stops a library rescan flagging every cached video as a
+    // missing file and offering to delete it.
+    QString youtubeCacheDir();
+    void setYoutubeCacheDir(const QString &path);
+    int youtubeCacheMaxGb();
+    void setYoutubeCacheMaxGb(int gb);
+    int youtubeCacheKeepDays();
+    void setYoutubeCacheKeepDays(int days);
+    // Empty means "the copy shipped next to the binary".
+    QString youtubeDlpPath();
+    void setYoutubeDlpPath(const QString &path);
+    // stable or nightly. Nightly by default because YouTube extractor fixes land
+    // there days before they reach a stable release, and a broken extractor during a
+    // show is the failure that actually costs the KJ something.
+    QString youtubeDlpChannel();
+    void setYoutubeDlpChannel(const QString &channel);
+    int youtubeMaxHeight();
+    void setYoutubeMaxHeight(int height);
+    // Rejects the hour-long "top 100 karaoke hits" uploads that would otherwise eat
+    // the cache and a singer's whole turn.
+    int youtubeMaxDurationSecs();
+    void setYoutubeMaxDurationSecs(int secs);
+    int youtubeMaxConcurrentFetches();
+    void setYoutubeMaxConcurrentFetches(int count);
     QString localUiUrl();
     void setLocalUiUrl(const QString &url);
     bool bmKCrossFade();

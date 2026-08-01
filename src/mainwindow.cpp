@@ -1365,6 +1365,16 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
             "CREATE TABLE IF NOT EXISTS local_event_settings ( settings_id INTEGER PRIMARY KEY CHECK(settings_id = 1), app_name TEXT NOT NULL DEFAULT 'OpenKJ', tagline TEXT NOT NULL DEFAULT '')");
     query.exec(
             "CREATE TABLE IF NOT EXISTS local_user_favorites ( username_normalized TEXT NOT NULL, song_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (username_normalized, song_id))");
+    // Fetch state for songs requested off YouTube. One row per video, keyed on the
+    // video id rather than songid because the dbsongs row is created first and the
+    // cache path is derived from the video id. state is pending|fetching|ready|failed.
+    query.exec(
+            "CREATE TABLE IF NOT EXISTS local_youtube_fetches ( video_id TEXT PRIMARY KEY, songid INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', progress INTEGER NOT NULL DEFAULT 0, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, requested_by TEXT, updated_at INTEGER NOT NULL DEFAULT 0)");
+    query.exec("CREATE INDEX IF NOT EXISTS idx_yt_fetches_songid ON local_youtube_fetches(songid)");
+    // Nothing is downloading at startup, so any row still marked fetching belongs to a
+    // run that died mid-download. Put it back in the queue rather than leaving a request
+    // that the rotation will skip forever.
+    query.exec("UPDATE local_youtube_fetches SET state = 'pending', progress = 0 WHERE state = 'fetching'");
     query.exec("INSERT OR IGNORE INTO local_event_settings (settings_id, app_name, tagline) VALUES (1, 'OpenKJ', '')");
     query.exec("PRAGMA synchronous=OFF");
     query.exec("PRAGMA cache_size=300000");
