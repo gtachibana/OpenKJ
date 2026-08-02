@@ -30,7 +30,14 @@ inline QString findMatchingAudioFile(const QString &cdgFilePath) {
 
     QFileInfo cdgInfo(cdgFilePath);
     for (const auto &ext : audioExtensions) {
-        QString testPath = cdgInfo.absolutePath() + QDir::separator() + cdgInfo.completeBaseName() + '.' + ext;
+        // '/' rather than QDir::separator(): absolutePath() already speaks Qt's
+        // internal separator, so a native one would splice a backslash into an
+        // otherwise forward-slash path. Windows opens such a path happily, which
+        // is why this went unnoticed - but QFile::rename decides a rename onto an
+        // existing name is a permitted case change by comparing the two paths as
+        // strings, and a mismatched separator makes a case-only rename look like
+        // a collision with a different file.
+        QString testPath = cdgInfo.absolutePath() + '/' + cdgInfo.completeBaseName() + '.' + ext;
         if (QFile::exists(testPath))
             return testPath;
     }

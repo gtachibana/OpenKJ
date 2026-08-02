@@ -641,7 +641,10 @@ QString TableModelKaraokeSongs::findCdgAudioFile(const QString &path) {
     };
     QFileInfo cdgInfo(path);
     for (const auto &ext : audioExtensions) {
-        QString testPath = cdgInfo.absolutePath() + QDir::separator() + cdgInfo.completeBaseName() + '.' + ext;
+        // '/' rather than QDir::separator() - see findMatchingAudioFile() in
+        // okjutil.h; a native separator spliced into a forward-slash path makes
+        // a later case-only rename of this file look like a name collision.
+        QString testPath = cdgInfo.absolutePath() + '/' + cdgInfo.completeBaseName() + '.' + ext;
         if (QFile::exists(testPath))
             return testPath;
     }
