@@ -507,6 +507,16 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
                                           "Videos still downloading are never listed."));
     ytLayout->addRow(QString(), m_checkBoxYtSearchable);
 
+    m_checkBoxYtDropOnEarlySkip = new QCheckBox(tr("Delete a video the singer skips in the first 30 seconds"),
+                                                m_groupBoxYoutube);
+    m_checkBoxYtDropOnEarlySkip->setChecked(m_settings.youtubeDropOnEarlySkip());
+    m_checkBoxYtDropOnEarlySkip->setToolTip(tr("Someone who ends their own song from their phone seconds after it\n"
+                                               "starts has almost always been given the wrong video - a lyric video,\n"
+                                               "a cover, no karaoke track. Only applies to a video's first play, and\n"
+                                               "only to videos nobody else has queued. Requesting it again fetches\n"
+                                               "it back."));
+    ytLayout->addRow(QString(), m_checkBoxYtDropOnEarlySkip);
+
     auto *manageButton = new QPushButton(tr("Manage downloaded videos..."), m_groupBoxYoutube);
     ytLayout->addRow(QString(), manageButton);
 
@@ -582,6 +592,9 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
     });
     connect(m_checkBoxYtSearchable, &QCheckBox::toggled, this, [this](const bool searchable) {
         m_settings.setYoutubeCachedSearchable(searchable);
+    });
+    connect(m_checkBoxYtDropOnEarlySkip, &QCheckBox::toggled, this, [this](const bool drop) {
+        m_settings.setYoutubeDropOnEarlySkip(drop);
     });
 
     refreshDlpStatusLabel();

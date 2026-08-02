@@ -68,6 +68,11 @@ bool isValidYoutubeVideoId(const QString &videoId) {
     return re.match(videoId).hasMatch();
 }
 
+QString videoIdForCachePath(const QString &path) {
+    const QString base = QFileInfo(path).completeBaseName();
+    return isValidYoutubeVideoId(base) ? base : QString();
+}
+
 bool songPathIsPlayable(const QString &path) {
     if (path.isEmpty()) {
         return false;

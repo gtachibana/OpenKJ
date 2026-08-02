@@ -114,6 +114,9 @@ private:
     QString m_curSinger;
     QString m_curArtist;
     QString m_curTitle;
+    // Set when a singer bails out of a freshly fetched video, acted on once the
+    // backend has stopped and let go of the file. See noteEarlySkipForEviction().
+    QString m_videoToEvictAfterStop;
     QString m_kAANextSongPath;
     MediaBackend::State m_lastAudioState{MediaBackend::StoppedState};
     SfxEntry m_lastRtClickedSfxBtn;
@@ -271,6 +274,8 @@ private slots:
     void toggleQueuePlayed();
     void previewKaraokeSong(const QString &path);
     void editSong(const std::shared_ptr<okj::KaraokeSong>& song);
+    void noteEarlySkipForEviction(qint64 positionMs);
+    void evictEarlySkippedVideo();
     void markSongBad(const std::shared_ptr<okj::KaraokeSong>& song);
     void unmarkSongBad(const std::shared_ptr<okj::KaraokeSong>& song);
     void deleteSongFile(const std::shared_ptr<okj::KaraokeSong>& song);

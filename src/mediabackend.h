@@ -111,6 +111,10 @@ public:
     qint64 position();
     qint64 duration();
     State state();
+    // The media file currently loaded. For a CDG this is the audio half, and for a
+    // zip the extracted temp file - only a plain video reads back the path the song
+    // was started from.
+    [[nodiscard]] QString loadedFilename() const { return m_filename; }
     QStringList getOutputDevices();
     static QString msToMMSS(const qint64 &msec)
     {
