@@ -19,8 +19,9 @@
 class Settings;
 
 // The discid stamped on dbsongs rows backed by a fetched video. Follows the
-// !!DROPPED!! / !!BAD!! convention already used for rows that aren't part of the
-// KJ's scanned library, which the catalog queries filter on.
+// !!DROPPED!! convention already used for rows that aren't part of the KJ's
+// scanned library, which the catalog queries filter on. (Songs marked bad used
+// to be flagged the same way; they have their own column now.)
 inline constexpr auto kYoutubeDiscId = "!!YOUTUBE!!";
 
 // Video ids become filenames and process arguments, so anything that fails this

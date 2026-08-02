@@ -2198,7 +2198,7 @@ QJsonObject OpenKJEmbeddedApi::listUserFavorites(const QUrlQuery &query)
                    "FROM local_user_favorites f "
                    "JOIN dbsongs ds ON ds.songid = f.song_id "
                    "WHERE f.username_normalized = :username "
-                   "AND ds.discid != '!!DROPPED!!' AND ds.discid != '!!BAD!!' "
+                   "AND ds.discid != '!!DROPPED!!' AND ds.bad = 0 "
                    "ORDER BY ds.artist, ds.title");
     select.bindValue(":username", normalized);
 
@@ -2227,7 +2227,7 @@ QJsonObject OpenKJEmbeddedApi::addUserFavorite(const QJsonObject &payload)
     const int songId = payload.value("songId").toInt();
     QSqlQuery exists;
     exists.prepare("SELECT songid FROM dbsongs WHERE songid = :song_id "
-                   "AND discid != '!!DROPPED!!' AND discid != '!!BAD!!'");
+                   "AND discid != '!!DROPPED!!' AND bad = 0");
     exists.bindValue(":song_id", songId);
     if (!exists.exec() || !exists.next()) {
         return QJsonObject{{"ok", false}, {"error", "Unknown song"}};
@@ -2283,7 +2283,7 @@ QJsonObject OpenKJEmbeddedApi::listUserHistory(const QUrlQuery &query)
                    "FROM historySongs hs "
                    "JOIN historySingers hsing ON hsing.id = hs.historySinger "
                    "LEFT JOIN dbsongs ds ON ds.path = hs.filepath "
-                   "AND ds.discid != '!!DROPPED!!' AND ds.discid != '!!BAD!!' "
+                   "AND ds.discid != '!!DROPPED!!' AND ds.bad = 0 "
                    "WHERE lower(hsing.name) = :username "
                    "ORDER BY hs.lastplay DESC LIMIT :limit");
     select.bindValue(":username", normalized);
@@ -2966,7 +2966,7 @@ QJsonObject OpenKJEmbeddedApi::requestSongFromLocalUser(const QJsonObject &paylo
 
 QString OpenKJEmbeddedApi::catalogFilterSql() const
 {
-    static const QString base = QStringLiteral("discid != '!!DROPPED!!' AND discid != '!!BAD!!' ");
+    static const QString base = QStringLiteral("discid != '!!DROPPED!!' AND bad = 0 ");
     if (!m_settings.youtubeCachedSearchable()) {
         return base + QStringLiteral("AND discid != '!!YOUTUBE!!' ");
     }

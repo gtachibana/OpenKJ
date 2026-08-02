@@ -1230,6 +1230,10 @@ void MainWindow::setupConnections() {
             &MainWindow::writeGstPipelineDiagramToDisk);
     connect(ui->comboBoxSearchType, qOverload<int>(&QComboBox::currentIndexChanged), this,
             &MainWindow::comboBoxSearchTypeIndexChanged);
+    connect(ui->cbxShowBadSongs, &QCheckBox::toggled, this, [this](const bool checked) {
+        m_karaokeSongsModel.setShowBadOnly(checked);
+        ui->tableViewDB->scrollToTop();
+    });
     connect(ui->actionDocumentation, &QAction::triggered, this, &MainWindow::actionDocumentation);
     connect(ui->btnToggleCdgWindow, &QPushButton::toggled, cdgWindow.get(), &DlgCdg::setVisible);
     connect(ui->tableViewBmPlaylist, &QTableView::customContextMenuRequested, this,
@@ -1473,6 +1477,21 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
                    "WHERE artist <> trim(artist) OR title <> trim(title)");
         query.exec("PRAGMA user_version = 109");
         m_logger->info("{} DB Schema update to v109 completed", m_loggingPrefix);
+    }
+    if (schemaVersion < 110) {
+        m_logger->info("{} Updating database schema to version 110", m_loggingPrefix);
+        // "Bad" used to be recorded by overwriting discid with a sentinel, which cost the
+        // song its real disc id and left no way back: every query in the app filtered the
+        // sentinel out, including the KJ's own library view, so a marked song could not be
+        // listed, inspected or unmarked from anywhere. A column carries the state without
+        // consuming a field that means something else, and the importer's ON CONFLICT
+        // update - which rewrites discid - leaves it alone.
+        query.exec("ALTER TABLE dbsongs ADD COLUMN bad INTEGER NOT NULL DEFAULT 0");
+        // The old disc ids are already gone - the sentinel overwrote them - so the best
+        // that can be done is to stop the sentinel from being displayed as one.
+        query.exec("UPDATE dbsongs SET bad = 1, discid = '' WHERE discid = '!!BAD!!'");
+        query.exec("PRAGMA user_version = 110");
+        m_logger->info("{} DB Schema update to v110 completed", m_loggingPrefix);
     }
 }
 
@@ -2528,7 +2547,13 @@ void MainWindow::tableViewDBContextMenuRequested(const QPoint &pos) {
         contextMenu.addSeparator();
     }
     contextMenu.addAction("Edit", [&] () { editSong(song); });
-    contextMenu.addAction("Mark bad", [&] () { markSongBad(song); });
+    if (song->bad) {
+        // Only reachable from the bad songs view - everywhere else these are filtered out.
+        contextMenu.addAction("Unmark bad", [&]() { unmarkSongBad(song); });
+        contextMenu.addAction("Delete file from disk", [&]() { deleteSongFile(song); });
+    } else {
+        contextMenu.addAction("Mark bad", [&] () { markSongBad(song); });
+    }
     contextMenu.exec(QCursor::pos());
 }
 
@@ -3047,38 +3072,60 @@ void MainWindow::markSongBad(const std::shared_ptr<okj::KaraokeSong>& song) {
     if (msgBox.clickedButton() == markBadButton) {
         m_karaokeSongsModel.markSongBad(song->path);
         msgBoxResult.setText("File marked as bad and will no longer show up in searches.");
+        msgBoxResult.setInformativeText(
+                "Tick \"Bad songs\" next to the search box to see the songs you've marked, and to unmark "
+                "or delete them.");
         msgBoxResult.setIcon(QMessageBox::Information);
         msgBoxResult.exec();
     } else if (msgBox.clickedButton() == removeFileButton) {
-        bool isCdg = false;
-        if (QFileInfo(song->path).suffix().toLower() == "cdg")
-            isCdg = true;
-        QString mediaFile;
-        if (isCdg)
-            mediaFile = findMatchingAudioFile(song->path);
-        QFile file(song->path);
-        auto ret = m_karaokeSongsModel.removeBadSong(song->path);
-        switch (ret) {
-            case TableModelKaraokeSongs::DELETE_OK:
-                msgBoxResult.setText("File removed successfully");
-                msgBoxResult.setIcon(QMessageBox::Information);
-                msgBoxResult.exec();
-                break;
-            case TableModelKaraokeSongs::DELETE_FAIL:
-                msgBoxResult.setText("Error while removing file");
-                msgBoxResult.setIcon(QMessageBox::Warning);
-                msgBoxResult.setInformativeText(
-                        "Unable to remove the file.  Please check file permissions.\nOperation cancelled.");
-                msgBoxResult.exec();
-                break;
-            case TableModelKaraokeSongs::DELETE_CDG_AUDIO_FAIL:
-                msgBoxResult.setText("Error while removing file");
-                msgBoxResult.setIcon(QMessageBox::Warning);
-                msgBoxResult.setInformativeText(
-                        "The cdg file was deleted, but there was an error while deleting the matching media file.  You will need to manually remove the file.");
-                msgBoxResult.exec();
-                break;
-        }
+        deleteSongFile(song);
+    }
+}
+
+void MainWindow::unmarkSongBad(const std::shared_ptr<okj::KaraokeSong> &song) {
+    m_karaokeSongsModel.unmarkSongBad(song->path);
+    m_logger->info("{} Song no longer marked bad: {}", m_loggingPrefix, song->path.toStdString());
+}
+
+void MainWindow::deleteSongFile(const std::shared_ptr<okj::KaraokeSong> &song) {
+    QMessageBox confirm;
+    confirm.setWindowTitle("Delete file from disk?");
+    confirm.setText("Permanently delete this file from disk?");
+    confirm.setIcon(QMessageBox::Warning);
+    // A loose CDG is half a song, and removeBadSong takes its audio with it - say so
+    // before the fact rather than reporting it afterwards.
+    confirm.setInformativeText(song->path +
+                               (QFileInfo(song->path).suffix().toLower() == "cdg"
+                                        ? "\n\nThe matching audio file will be deleted too."
+                                        : "") +
+                               "\n\nThis cannot be undone.");
+    confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+    confirm.setDefaultButton(QMessageBox::Cancel);
+    if (confirm.exec() != QMessageBox::Yes)
+        return;
+
+    QMessageBox msgBoxResult;
+    switch (m_karaokeSongsModel.removeBadSong(song->path)) {
+        case TableModelKaraokeSongs::DELETE_OK:
+            m_logger->info("{} Deleted song file from disk: {}", m_loggingPrefix, song->path.toStdString());
+            msgBoxResult.setText("File removed successfully");
+            msgBoxResult.setIcon(QMessageBox::Information);
+            msgBoxResult.exec();
+            break;
+        case TableModelKaraokeSongs::DELETE_FAIL:
+            msgBoxResult.setText("Error while removing file");
+            msgBoxResult.setIcon(QMessageBox::Warning);
+            msgBoxResult.setInformativeText(
+                    "Unable to remove the file.  Please check file permissions.\nOperation cancelled.");
+            msgBoxResult.exec();
+            break;
+        case TableModelKaraokeSongs::DELETE_CDG_AUDIO_FAIL:
+            msgBoxResult.setText("Error while removing file");
+            msgBoxResult.setIcon(QMessageBox::Warning);
+            msgBoxResult.setInformativeText(
+                    "The cdg file was deleted, but there was an error while deleting the matching media file.  You will need to manually remove the file.");
+            msgBoxResult.exec();
+            break;
     }
 }
 

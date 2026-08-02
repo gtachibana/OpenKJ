@@ -607,6 +607,19 @@
                      </widget>
                     </item>
                     <item>
+                     <widget class="QCheckBox" name="cbxShowBadSongs">
+                      <property name="focusPolicy">
+                       <enum>Qt::NoFocus</enum>
+                      </property>
+                      <property name="toolTip">
+                       <string>Show only the songs marked bad, so they can be checked, unmarked, or deleted. Songs marked bad are hidden from the library, from singer requests, and from printed songbooks.</string>
+                      </property>
+                      <property name="text">
+                       <string>Bad songs</string>
+                      </property>
+                     </widget>
+                    </item>
+                    <item>
                      <spacer name="horizontalSpacerRequests">
                       <property name="orientation">
                        <enum>Qt::Horizontal</enum>

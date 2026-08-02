@@ -272,6 +272,8 @@ private slots:
     void previewKaraokeSong(const QString &path);
     void editSong(const std::shared_ptr<okj::KaraokeSong>& song);
     void markSongBad(const std::shared_ptr<okj::KaraokeSong>& song);
+    void unmarkSongBad(const std::shared_ptr<okj::KaraokeSong>& song);
+    void deleteSongFile(const std::shared_ptr<okj::KaraokeSong>& song);
     void karaokeAATimerTimeout();
     void timerButtonFlashTimeout();
     void autosizeViews();
