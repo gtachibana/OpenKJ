@@ -994,6 +994,15 @@ void MainWindow::setupConnections() {
     connect(&m_mediaBackendKar, &MediaBackend::volumeChanged, ui->sliderVolume, &QSlider::setValue);
     connect(&m_mediaBackendKar, &MediaBackend::positionChanged, this, &MainWindow::karaokeMediaBackend_positionChanged);
     connect(&m_mediaBackendKar, &MediaBackend::durationChanged, this, &MainWindow::karaokeMediaBackend_durationChanged);
+    // Its own connection rather than a branch inside karaokeMediaBackend_stateChanged,
+    // which returns early in several places before it would be reached. Connected
+    // ahead of that handler so it runs first: that one advances the rotation, and if
+    // the next singer had queued the very same video, the file would be in use by the
+    // time this got to it.
+    connect(&m_mediaBackendKar, &MediaBackend::stateChanged, this, [this](const MediaBackend::State state) {
+        if (state == MediaBackend::StoppedState)
+            evictEarlySkippedVideo();
+    });
     connect(&m_mediaBackendKar, &MediaBackend::stateChanged, this, &MainWindow::karaokeMediaBackend_stateChanged);
     connect(&m_mediaBackendKar, &MediaBackend::hasActiveVideoChanged, [&](const bool &isActive) {
         m_kHasActiveVideo = isActive;
@@ -1230,6 +1239,10 @@ void MainWindow::setupConnections() {
             &MainWindow::writeGstPipelineDiagramToDisk);
     connect(ui->comboBoxSearchType, qOverload<int>(&QComboBox::currentIndexChanged), this,
             &MainWindow::comboBoxSearchTypeIndexChanged);
+    connect(ui->cbxShowBadSongs, &QCheckBox::toggled, this, [this](const bool checked) {
+        m_karaokeSongsModel.setShowBadOnly(checked);
+        ui->tableViewDB->scrollToTop();
+    });
     connect(ui->actionDocumentation, &QAction::triggered, this, &MainWindow::actionDocumentation);
     connect(ui->btnToggleCdgWindow, &QPushButton::toggled, cdgWindow.get(), &DlgCdg::setVisible);
     connect(ui->tableViewBmPlaylist, &QTableView::customContextMenuRequested, this,
@@ -1473,6 +1486,21 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
                    "WHERE artist <> trim(artist) OR title <> trim(title)");
         query.exec("PRAGMA user_version = 109");
         m_logger->info("{} DB Schema update to v109 completed", m_loggingPrefix);
+    }
+    if (schemaVersion < 110) {
+        m_logger->info("{} Updating database schema to version 110", m_loggingPrefix);
+        // "Bad" used to be recorded by overwriting discid with a sentinel, which cost the
+        // song its real disc id and left no way back: every query in the app filtered the
+        // sentinel out, including the KJ's own library view, so a marked song could not be
+        // listed, inspected or unmarked from anywhere. A column carries the state without
+        // consuming a field that means something else, and the importer's ON CONFLICT
+        // update - which rewrites discid - leaves it alone.
+        query.exec("ALTER TABLE dbsongs ADD COLUMN bad INTEGER NOT NULL DEFAULT 0");
+        // The old disc ids are already gone - the sentinel overwrote them - so the best
+        // that can be done is to stop the sentinel from being displayed as one.
+        query.exec("UPDATE dbsongs SET bad = 1, discid = '' WHERE discid = '!!BAD!!'");
+        query.exec("PRAGMA user_version = 110");
+        m_logger->info("{} DB Schema update to v110 completed", m_loggingPrefix);
     }
 }
 
@@ -2215,6 +2243,10 @@ void MainWindow::skipCurrentSongViaApi() {
         return;
     }
     m_logger->info("{} Current singer skipped the rest of their song from the remote", m_loggingPrefix);
+    // Has to be read before the pipeline is torn down - position() means nothing once
+    // it is. This is the only caller that can tell a singer bailing out from a song
+    // running out, so it is the only place the judgement can be made.
+    noteEarlySkipForEviction(m_mediaBackendKar.position());
     m_kAASkip = false;
     cdgWindow->showAlert(false);
     audioRecorder.stop();
@@ -2225,6 +2257,68 @@ void MainWindow::skipCurrentSongViaApi() {
         m_mediaBackendKar.stop();
         m_mediaBackendBm.fadeIn();
     }
+}
+
+// A singer bailing out of a freshly downloaded video within the first few seconds is
+// the clearest signal OpenKJ ever gets that the video was the wrong one - a lyric
+// video, a cover, or no karaoke track at all. The person who chose it is the person
+// who stopped it, and nobody else has had a chance to want it: it was fetched for
+// this request and this is the only play it has ever had. So it goes back off the
+// disk, and if the singer meant to sing it after all, asking again fetches it back.
+//
+// Only ever a cached video. A library file the KJ scanned in is theirs, and an early
+// skip is nowhere near enough to start deleting from a collection.
+void MainWindow::noteEarlySkipForEviction(const qint64 positionMs) {
+    m_videoToEvictAfterStop.clear();
+    if (!m_settings.youtubeDropOnEarlySkip())
+        return;
+    if (positionMs < 0 || positionMs >= kEarlySkipCutoffMs)
+        return;
+
+    const QString path = m_mediaBackendKar.loadedFilename();
+    const QString videoId = videoIdForCachePath(path);
+    if (videoId.isEmpty())
+        return;
+
+    // Returns no row for anything that isn't a fetched video, so a library song that
+    // happens to be named like a video id still falls out here. plays is incremented
+    // when a song starts, not when it finishes, so the play in progress is already
+    // counted: 1 means this is the first and only time it has been on screen.
+    QSqlQuery query;
+    query.prepare("SELECT plays FROM dbsongs WHERE path = :path AND discid = :discid");
+    query.bindValue(":path", path);
+    query.bindValue(":discid", QString(kYoutubeDiscId));
+    if (!query.exec() || !query.next())
+        return;
+    if (query.value(0).toInt() > 1) {
+        m_logger->info("{} Keeping {} after an early skip - it has been sung before", m_loggingPrefix,
+                       videoId.toStdString());
+        return;
+    }
+
+    // Deferred rather than done here: the pipeline still holds the file open, and on
+    // Windows the delete would simply fail. evict() runs once the backend reports it
+    // has stopped.
+    m_videoToEvictAfterStop = videoId;
+}
+
+void MainWindow::evictEarlySkippedVideo() {
+    if (m_videoToEvictAfterStop.isEmpty())
+        return;
+    const QString videoId = m_videoToEvictAfterStop;
+    m_videoToEvictAfterStop.clear();
+
+    QString error;
+    if (m_youtubeFetcher.evict(videoId, &error)) {
+        m_logger->info("{} Deleted {} - the singer who requested it skipped out in the first {} seconds",
+                       m_loggingPrefix, videoId.toStdString(), kEarlySkipCutoffMs / 1000);
+        return;
+    }
+    // Not a failure worth bothering the KJ with - the video is still queued for
+    // somebody, or the file is held open - but silence here would make the whole
+    // feature look like it does nothing.
+    m_logger->info("{} Kept {} after an early skip: {}", m_loggingPrefix, videoId.toStdString(),
+                   error.toStdString());
 }
 
 void MainWindow::karaokeMediaBackend_pitchChanged(const int semitones) {
@@ -2528,7 +2622,13 @@ void MainWindow::tableViewDBContextMenuRequested(const QPoint &pos) {
         contextMenu.addSeparator();
     }
     contextMenu.addAction("Edit", [&] () { editSong(song); });
-    contextMenu.addAction("Mark bad", [&] () { markSongBad(song); });
+    if (song->bad) {
+        // Only reachable from the bad songs view - everywhere else these are filtered out.
+        contextMenu.addAction("Unmark bad", [&]() { unmarkSongBad(song); });
+        contextMenu.addAction("Delete file from disk", [&]() { deleteSongFile(song); });
+    } else {
+        contextMenu.addAction("Mark bad", [&] () { markSongBad(song); });
+    }
     contextMenu.exec(QCursor::pos());
 }
 
@@ -3047,38 +3147,60 @@ void MainWindow::markSongBad(const std::shared_ptr<okj::KaraokeSong>& song) {
     if (msgBox.clickedButton() == markBadButton) {
         m_karaokeSongsModel.markSongBad(song->path);
         msgBoxResult.setText("File marked as bad and will no longer show up in searches.");
+        msgBoxResult.setInformativeText(
+                "Tick \"Bad songs\" next to the search box to see the songs you've marked, and to unmark "
+                "or delete them.");
         msgBoxResult.setIcon(QMessageBox::Information);
         msgBoxResult.exec();
     } else if (msgBox.clickedButton() == removeFileButton) {
-        bool isCdg = false;
-        if (QFileInfo(song->path).suffix().toLower() == "cdg")
-            isCdg = true;
-        QString mediaFile;
-        if (isCdg)
-            mediaFile = findMatchingAudioFile(song->path);
-        QFile file(song->path);
-        auto ret = m_karaokeSongsModel.removeBadSong(song->path);
-        switch (ret) {
-            case TableModelKaraokeSongs::DELETE_OK:
-                msgBoxResult.setText("File removed successfully");
-                msgBoxResult.setIcon(QMessageBox::Information);
-                msgBoxResult.exec();
-                break;
-            case TableModelKaraokeSongs::DELETE_FAIL:
-                msgBoxResult.setText("Error while removing file");
-                msgBoxResult.setIcon(QMessageBox::Warning);
-                msgBoxResult.setInformativeText(
-                        "Unable to remove the file.  Please check file permissions.\nOperation cancelled.");
-                msgBoxResult.exec();
-                break;
-            case TableModelKaraokeSongs::DELETE_CDG_AUDIO_FAIL:
-                msgBoxResult.setText("Error while removing file");
-                msgBoxResult.setIcon(QMessageBox::Warning);
-                msgBoxResult.setInformativeText(
-                        "The cdg file was deleted, but there was an error while deleting the matching media file.  You will need to manually remove the file.");
-                msgBoxResult.exec();
-                break;
-        }
+        deleteSongFile(song);
+    }
+}
+
+void MainWindow::unmarkSongBad(const std::shared_ptr<okj::KaraokeSong> &song) {
+    m_karaokeSongsModel.unmarkSongBad(song->path);
+    m_logger->info("{} Song no longer marked bad: {}", m_loggingPrefix, song->path.toStdString());
+}
+
+void MainWindow::deleteSongFile(const std::shared_ptr<okj::KaraokeSong> &song) {
+    QMessageBox confirm;
+    confirm.setWindowTitle("Delete file from disk?");
+    confirm.setText("Permanently delete this file from disk?");
+    confirm.setIcon(QMessageBox::Warning);
+    // A loose CDG is half a song, and removeBadSong takes its audio with it - say so
+    // before the fact rather than reporting it afterwards.
+    confirm.setInformativeText(song->path +
+                               (QFileInfo(song->path).suffix().toLower() == "cdg"
+                                        ? "\n\nThe matching audio file will be deleted too."
+                                        : "") +
+                               "\n\nThis cannot be undone.");
+    confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+    confirm.setDefaultButton(QMessageBox::Cancel);
+    if (confirm.exec() != QMessageBox::Yes)
+        return;
+
+    QMessageBox msgBoxResult;
+    switch (m_karaokeSongsModel.removeBadSong(song->path)) {
+        case TableModelKaraokeSongs::DELETE_OK:
+            m_logger->info("{} Deleted song file from disk: {}", m_loggingPrefix, song->path.toStdString());
+            msgBoxResult.setText("File removed successfully");
+            msgBoxResult.setIcon(QMessageBox::Information);
+            msgBoxResult.exec();
+            break;
+        case TableModelKaraokeSongs::DELETE_FAIL:
+            msgBoxResult.setText("Error while removing file");
+            msgBoxResult.setIcon(QMessageBox::Warning);
+            msgBoxResult.setInformativeText(
+                    "Unable to remove the file.  Please check file permissions.\nOperation cancelled.");
+            msgBoxResult.exec();
+            break;
+        case TableModelKaraokeSongs::DELETE_CDG_AUDIO_FAIL:
+            msgBoxResult.setText("Error while removing file");
+            msgBoxResult.setIcon(QMessageBox::Warning);
+            msgBoxResult.setInformativeText(
+                    "The cdg file was deleted, but there was an error while deleting the matching media file.  You will need to manually remove the file.");
+            msgBoxResult.exec();
+            break;
     }
 }
 

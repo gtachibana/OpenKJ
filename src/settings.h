@@ -329,6 +329,12 @@ public:
     // disk - one still downloading or failed is never searchable.
     bool youtubeCachedSearchable();
     void setYoutubeCachedSearchable(bool searchable);
+    // Whether a video a singer bails out of in the first few seconds is deleted again.
+    // The singer who asked for it is the one who stopped it, on the only play it has
+    // ever had, so the video was almost certainly the wrong one - a lyric video, a
+    // cover, no karaoke track. Nothing is lost that a second request won't fetch back.
+    bool youtubeDropOnEarlySkip();
+    void setYoutubeDropOnEarlySkip(bool drop);
     QString localUiUrl();
     void setLocalUiUrl(const QString &url);
     bool bmKCrossFade();

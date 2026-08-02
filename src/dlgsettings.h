@@ -80,6 +80,7 @@ private:
     QSpinBox *m_spinBoxYtKeepDays{nullptr};
     QSpinBox *m_spinBoxYtConcurrent{nullptr};
     QCheckBox *m_checkBoxYtSearchable{nullptr};
+    QCheckBox *m_checkBoxYtDropOnEarlySkip{nullptr};
     // Not owned. Null when the dialog is used without one, which keeps the YouTube
     // group inert rather than crashing.
     YoutubeFetcher *m_youtubeFetcher{nullptr};

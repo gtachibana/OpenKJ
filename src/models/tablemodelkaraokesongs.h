@@ -55,11 +55,16 @@ public:
     void sort(int column, Qt::SortOrder order) override;
     void search(const QString &searchString);
     void setSearchType(SearchType type);
+    // Swaps the library view over to the songs marked bad, which are hidden from
+    // every other list in the app - this is the only place they can be seen.
+    void setShowBadOnly(bool showBadOnly);
+    [[nodiscard]] bool showBadOnly() const { return m_showBadOnly; }
     int getIdForPath(const QString &path);
     QString getPath(int songId);
     void updateSongHistory(int songId);
     okj::KaraokeSong &getSong(int songId);
     void markSongBad(QString path);
+    void unmarkSongBad(QString path);
     DeleteStatus removeBadSong(QString path);
     QString findCdgAudioFile(const QString& path);
     int addSong(okj::KaraokeSong song);
@@ -81,6 +86,7 @@ private:
     QImage m_iconZip;
     QImage m_iconVid;
     SearchType m_searchType{SearchType::SEARCH_TYPE_ALL};
+    bool m_showBadOnly{false};
     Settings m_settings;
     QFont m_itemFont;
     int m_itemHeight{20};
@@ -95,6 +101,7 @@ private:
     static void setSearchHaystacks(okj::KaraokeSong &song, bool ignoreApos);
     [[nodiscard]] const QString &searchHaystack(const okj::KaraokeSong &song) const;
     void rebuildPathHash();
+    void setSongBad(QString path, bool bad);
     static QVariant getColumnName(int section) ;
     [[nodiscard]] QVariant getColumnSizeHint(int section) const;
     [[nodiscard]] QVariant getItemDisplayData(const QModelIndex &index) const;

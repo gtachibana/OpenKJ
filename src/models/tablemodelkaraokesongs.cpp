@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 #include "gainlazyupdater.h"
 #include "okjfmt.h"
@@ -228,7 +229,7 @@ void TableModelKaraokeSongs::loadData() {
         m_allSongs.reserve(rows);
         m_filteredSongs.reserve(rows);
     }
-    query.exec("SELECT songid,artist,title,discid,duration,filename,path,searchstring,plays,lastplay,gain FROM dbsongs");
+    query.exec("SELECT songid,artist,title,discid,duration,filename,path,searchstring,plays,lastplay,gain,bad FROM dbsongs");
     while (query.next()) {
         const auto &song = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(okj::KaraokeSong{
                 query.value(0).toInt(),
@@ -244,7 +245,7 @@ void TableModelKaraokeSongs::loadData() {
                 query.value(7).toString().replace('&', " and ").toLower(),
                 query.value(8).toInt(),
                 query.value(9).toDateTime(),
-                (query.value(3).toString() == "!!BAD!!"),
+                query.value(11).toBool(),
                 (query.value(3).toString() == "!!DROPPED!!"),
                 // NULL means never analyzed, which the model shows as blank rather
                 // than as a gain of 0 dB - those are very different things.
@@ -350,7 +351,10 @@ void TableModelKaraokeSongs::searchExec() {
     for (const auto &song : candidates) {
         if (song->dropped)
             continue;
-        if (song->bad)
+        // Review mode inverts the filter rather than widening it: the point of the
+        // list is to work through the marked songs, and a handful of them buried in
+        // 100k good ones is not a list anybody can review.
+        if (song->bad != m_showBadOnly)
             continue;
         const QString &haystack = searchHaystack(*song);
         bool match{true};
@@ -377,6 +381,14 @@ void TableModelKaraokeSongs::setSearchType(TableModelKaraokeSongs::SearchType ty
     if (m_searchType == type)
         return;
     m_searchType = type;
+    invalidateSearchNarrowing();
+    requestSearch();
+}
+
+void TableModelKaraokeSongs::setShowBadOnly(const bool showBadOnly) {
+    if (m_showBadOnly == showBadOnly)
+        return;
+    m_showBadOnly = showBadOnly;
     invalidateSearchNarrowing();
     requestSearch();
 }
@@ -542,26 +554,28 @@ void TableModelKaraokeSongs::setSongGains(const QVector<QPair<QString, double>> 
 }
 
 void TableModelKaraokeSongs::markSongBad(QString path) {
+    setSongBad(std::move(path), true);
+}
+
+void TableModelKaraokeSongs::unmarkSongBad(QString path) {
+    setSongBad(std::move(path), false);
+}
+
+void TableModelKaraokeSongs::setSongBad(QString path, const bool bad) {
     QSqlQuery query;
-    query.prepare("UPDATE dbsongs SET discid='!!BAD!!' WHERE path == :path");
+    query.prepare("UPDATE dbsongs SET bad = :bad WHERE path == :path");
+    query.bindValue(":bad", bad ? 1 : 0);
     query.bindValue(":path", path);
     query.exec();
 
-    emit layoutAboutToBeChanged();
-    auto newFilteredEnd = std::remove_if(m_filteredSongs.begin(), m_filteredSongs.end(),
-                                         [&path](const std::shared_ptr<okj::KaraokeSong> &song) {
-                                             return (song->path == path);
-                                         });
-    m_filteredSongs.erase(newFilteredEnd, m_filteredSongs.end());
-    emit layoutChanged();
+    if (const auto it = m_songsByPath.constFind(path); it != m_songsByPath.constEnd())
+        it.value()->bad = bad;
 
-    auto songEntry = std::find_if(m_allSongs.begin(), m_allSongs.end(),
-                                         [&path](const std::shared_ptr<okj::KaraokeSong> &song) {
-                                             return (song->path == path);
-                                         });
-    if (songEntry != m_allSongs.end())
-        songEntry->get()->bad = true;
+    // The song has to leave one list and join the other, and which of those is on
+    // screen depends on the review toggle - so re-run the filter rather than trying
+    // to patch m_filteredSongs for both cases.
     invalidateSearchNarrowing();
+    requestSearch();
 }
 
 TableModelKaraokeSongs::DeleteStatus TableModelKaraokeSongs::removeBadSong(QString path) {

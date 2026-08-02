@@ -19,8 +19,9 @@
 class Settings;
 
 // The discid stamped on dbsongs rows backed by a fetched video. Follows the
-// !!DROPPED!! / !!BAD!! convention already used for rows that aren't part of the
-// KJ's scanned library, which the catalog queries filter on.
+// !!DROPPED!! convention already used for rows that aren't part of the KJ's
+// scanned library, which the catalog queries filter on. (Songs marked bad used
+// to be flagged the same way; they have their own column now.)
 inline constexpr auto kYoutubeDiscId = "!!YOUTUBE!!";
 
 // Video ids become filenames and process arguments, so anything that fails this
@@ -39,6 +40,17 @@ bool isValidYoutubeVideoId(const QString &videoId);
 // turn on a file that isn't there yet; the request stays queued and comes back
 // around on the next pass.
 bool songPathIsPlayable(const QString &path);
+
+// How far into a video a singer can bail out and still have it read as "this was the
+// wrong video" rather than "I changed my mind". Long enough to sit through the intro
+// of a track that turns out to have no lyrics on it, short enough that nobody who
+// meant to sing reaches it.
+inline constexpr qint64 kEarlySkipCutoffMs = 30000;
+
+// The video a cached file belongs to, or empty for anything that is not one. Every
+// file in the cache is named after its video id, so this is pure string work - no
+// lookup, and safe to call on library paths and temp files alike.
+QString videoIdForCachePath(const QString &path);
 
 // Downloads requested YouTube videos to a local cache with yt-dlp, one QProcess per
 // job, so the rest of the app only ever deals with a normal file on disk.

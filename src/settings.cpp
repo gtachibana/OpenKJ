@@ -1864,6 +1864,16 @@ void Settings::setYoutubeCachedSearchable(bool searchable)
     setScopedValue("youtubeCachedSearchable", searchable, LocalMode);
 }
 
+bool Settings::youtubeDropOnEarlySkip()
+{
+    return scopedValue("youtubeDropOnEarlySkip", true, false, LocalMode).toBool();
+}
+
+void Settings::setYoutubeDropOnEarlySkip(bool drop)
+{
+    setScopedValue("youtubeDropOnEarlySkip", drop, LocalMode);
+}
+
 void Settings::setEmbeddedApiEnabled(bool enabled)
 {
     setScopedValue("embeddedApiEnabled", enabled, LocalMode);

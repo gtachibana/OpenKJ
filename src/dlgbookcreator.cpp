@@ -116,7 +116,7 @@ void DlgBookCreator::saveFontSettings() {
 QStringList DlgBookCreator::getArtists() {
     QSqlQuery query;
     QStringList artists;
-    QString sql = "SELECT DISTINCT artist FROM dbsongs WHERE discid != '!!BAD!!' AND discid != '!!DROPPED!!' AND discid != '!!YOUTUBE!!' ORDER BY artist";
+    QString sql = "SELECT DISTINCT artist FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!YOUTUBE!!' AND bad = 0 ORDER BY artist";
     query.exec(sql);
     while (query.next()) {
         artists.append(query.value("artist").toString());
@@ -127,7 +127,7 @@ QStringList DlgBookCreator::getArtists() {
 QStringList DlgBookCreator::getTitles(const QString &artist) {
     QSqlQuery query;
     QStringList titles;
-    QString sql = "SELECT DISTINCT title FROM dbsongs WHERE artist = :artist AND discid != '!!BAD!!' AND discid != '!!DROPPED!!' AND discid != '!!YOUTUBE!!' ORDER BY title";
+    QString sql = "SELECT DISTINCT title FROM dbsongs WHERE artist = :artist AND discid != '!!DROPPED!!' AND discid != '!!YOUTUBE!!' AND bad = 0 ORDER BY title";
     query.prepare(sql);
     query.bindValue(":artist", artist);
     query.exec();
