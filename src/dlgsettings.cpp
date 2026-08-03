@@ -38,6 +38,7 @@
 #include <QNetworkReply>
 #include <QAuthenticator>
 #include <QKeySequenceEdit>
+#include <QScrollArea>
 #include "audiorecorder.h"
 #include "dlgyoutubecache.h"
 #include <QScreen>
@@ -55,7 +56,10 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     m_pageSetupDone = false;
     networkManager = new QNetworkAccessManager(this);
     ui->setupUi(this);
-    m_settings.restoreWindowState(this);
+    // The size the dialog was drawn at, before any saved geometry replaces it -
+    // it is the floor for how small the dialog opens on a first run.
+    const QSize designedSize = size();
+    const bool restoredGeometry = m_settings.restoreWindowState(this);
     setStyleSheet(R"(
         QDialog {
             background: palette(window);
@@ -269,7 +273,6 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     ui->checkBoxEnforceAspectRatio->setChecked(m_settings.enforceAspectRatio());
     ui->checkBoxTreatAllSingersAsRegs->setChecked(m_settings.treatAllSingersAsRegs());
     ui->cbxCrossFade->setChecked(m_settings.bmKCrossFade());
-    adjustSize();
     tickerFontChanged();
     tickerBgColorChanged();
     tickerTextColorChanged();
@@ -333,7 +336,63 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     connect(ui->cbxRotShowNextSong, &QCheckBox::toggled, this, &DlgSettings::rotationShowNextSongChanged);
     setupHotkeysForm();
     refreshNetworkModeUi();
+    makeTabsScrollable();
+    if (!restoredGeometry) {
+        adjustSize();
+        resize(size().expandedTo(designedSize));
+    }
+    clampToScreen();
     m_pageSetupDone = true;
+}
+
+void DlgSettings::makeTabsScrollable() {
+    // Settings keep getting added and a page that outgrows the screen has no way
+    // to reach its bottom half, so every page scrolls. This also keeps the pages
+    // usable at the larger application font sizes the Display tab offers.
+    for (int page = 0; page < ui->tabWidgetMain->count(); page++) {
+        auto *tab = ui->tabWidgetMain->widget(page);
+        auto *tabLayout = tab->layout();
+        if (tabLayout == nullptr)
+            continue;
+        // Pages drawn around a scroll area of their own are already covered.
+        if (tabLayout->count() == 1 && qobject_cast<QScrollArea *>(tabLayout->itemAt(0)->widget()) != nullptr)
+            continue;
+
+        // Adopting the layout carries the widgets it holds across with it.
+        auto *contents = new QWidget;
+        contents->setLayout(tabLayout);
+
+        auto *scrollArea = new QScrollArea(tab);
+        scrollArea->setWidgetResizable(true);
+        // The pane the tab widget draws is border enough.
+        scrollArea->setFrameShape(QFrame::NoFrame);
+        scrollArea->setWidget(contents);
+
+        auto *host = new QVBoxLayout(tab);
+        host->setContentsMargins(0, 0, 0, 0);
+        host->addWidget(scrollArea);
+    }
+}
+
+void DlgSettings::clampToScreen() {
+    const QScreen *screen = QGuiApplication::screenAt(frameGeometry().center());
+    if (screen == nullptr)
+        screen = QGuiApplication::primaryScreen();
+    if (screen == nullptr)
+        return;
+
+    // On Windows nothing stops adjustSize() - or a geometry saved on a bigger
+    // monitor - from handing back a window taller than the display it is on,
+    // which puts the buttons along the bottom out of reach. Room is left for the
+    // window frame so the title bar and bottom edge stay grabbable.
+    const QRect available = screen->availableGeometry().adjusted(0, 0, -40, -60);
+    // Only the size is touched: restoreGeometry() already drags a window saved
+    // off the edge of a monitor that is no longer there back into view, and a
+    // dialog that has never been placed has to be left alone for Qt to centre it
+    // over the main window.
+    const QSize bounded = size().boundedTo(available.size());
+    if (bounded != size())
+        resize(bounded);
 }
 
 DlgSettings::~DlgSettings() {

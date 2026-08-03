@@ -28,6 +28,9 @@ public:
     // True if anything was written, so the caller knows to reload the library.
     [[nodiscard]] bool appliedChanges() const { return m_appliedChanges; }
 
+protected:
+    void showEvent(QShowEvent *event) override;
+
 private slots:
     void on_btnApply_clicked();
     void on_btnClose_clicked();
@@ -79,6 +82,7 @@ private:
 
     void analyze();
     void populateTable();
+    void sizeColumns();
     void applyFilter();
     void updateSummary();
     [[nodiscard]] std::vector<LibraryNameCleaner::Proposal> checkedProposals() const;

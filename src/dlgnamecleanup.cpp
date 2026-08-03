@@ -1,6 +1,8 @@
 #include "dlgnamecleanup.h"
 #include "ui_dlgnamecleanup.h"
 
+#include <algorithm>
+
 #include <QApplication>
 #include <QFileDialog>
 #include <QFont>
@@ -95,8 +97,15 @@ void DlgNameCleanup::populateTable() {
             item->setFlags(item->flags() & ~Qt::ItemIsEditable);
             return item;
         };
-        ui->tableWidget->setItem(row, COL_ARTIST, readOnly(new QTableWidgetItem(proposal.scopeArtist)));
-        ui->tableWidget->setItem(row, COL_CURRENT, readOnly(new QTableWidgetItem(proposal.oldValue)));
+        // Names are capped to a readable width below, so anything long is only
+        // fully legible in the tooltip.
+        const auto withTooltip = [&readOnly](const QString &value) {
+            auto *item = new QTableWidgetItem(value);
+            item->setToolTip(value);
+            return readOnly(item);
+        };
+        ui->tableWidget->setItem(row, COL_ARTIST, withTooltip(proposal.scopeArtist));
+        ui->tableWidget->setItem(row, COL_CURRENT, withTooltip(proposal.oldValue));
 
         const QString target = targetValue(proposal);
         auto *proposedItem = new QTableWidgetItem(target);
@@ -126,8 +135,34 @@ void DlgNameCleanup::populateTable() {
     }
 
     ui->tableWidget->setSortingEnabled(true);
-    ui->tableWidget->resizeColumnsToContents();
+    sizeColumns();
     m_populating = false;
+}
+
+void DlgNameCleanup::sizeColumns() {
+    auto *table = ui->tableWidget;
+    auto *header = table->horizontalHeader();
+    table->resizeColumnsToContents();
+
+    // Why is the last column and stretches, so all it needs is for the others
+    // not to crowd it out. Sized to their contents, one long artist or title
+    // takes the whole width and pushes Why off the right-hand edge - the column
+    // that says whether a row can be trusted, and so the last thing that should
+    // need scrolling to. The columns holding a value from a short fixed set get
+    // what they need; the three free-text ones share what is left of the width.
+    const int reason = std::max(table->sizeHintForColumn(COL_REASON), header->sectionSizeHint(COL_REASON));
+    const int fixed = header->sectionSize(COL_FIELD) + header->sectionSize(COL_SONGS)
+                      + header->sectionSize(COL_CONFIDENCE) + reason;
+    const int cap = std::max((table->viewport()->width() - fixed) / 3,
+                             table->fontMetrics().averageCharWidth() * 12);
+    for (const int column : {COL_ARTIST, COL_CURRENT, COL_PROPOSED})
+        header->resizeSection(column, std::min(header->sectionSize(column), cap));
+}
+
+void DlgNameCleanup::showEvent(QShowEvent *event) {
+    QDialog::showEvent(event);
+    // The first pass ran against a viewport that had no real width yet.
+    sizeColumns();
 }
 
 void DlgNameCleanup::applyFilter() {
