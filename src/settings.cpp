@@ -463,21 +463,24 @@ void Settings::saveWindowState(QWidget *window)
     settings->endGroup();
 }
 
-void Settings::restoreWindowState(QWidget *window)
+bool Settings::restoreWindowState(QWidget *window)
 {
     if (m_safeStartupMode)
-        return;
+        return false;
+    bool restored{false};
     settings->beginGroup(window->objectName());
     if (settings->contains("geometry"))
     {
-        window->restoreGeometry(settings->value("geometry").toByteArray());
+        restored = window->restoreGeometry(settings->value("geometry").toByteArray());
     }
     else if (settings->contains("size") && settings->contains("pos"))
     {
         window->resize(settings->value("size", QSize(640, 480)).toSize());
         window->move(settings->value("pos", QPoint(100, 100)).toPoint());
+        restored = true;
     }
     settings->endGroup();
+    return restored;
 }
 
 void Settings::saveColumnWidths(QTreeView *treeView)

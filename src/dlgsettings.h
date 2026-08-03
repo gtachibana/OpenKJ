@@ -92,6 +92,8 @@ private:
     void refreshYtCacheWarning();
     void refreshNetworkModeUi();
     void setupHotkeysForm();
+    void makeTabsScrollable();
+    void clampToScreen();
     struct KeyboardShortcut
     {
         QString description;

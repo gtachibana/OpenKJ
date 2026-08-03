@@ -129,7 +129,7 @@ public:
     void setCdgWindowFullscreenMonitor(int monitor);
     int  cdgWindowFullScreenMonitor();
     void saveWindowState(QWidget *window);
-    void restoreWindowState(QWidget *window);
+    bool restoreWindowState(QWidget *window);
     void saveColumnWidths(QTreeView *treeView);
     void saveColumnWidths(QTableView *tableView);
     void restoreColumnWidths(QTreeView *treeView);
