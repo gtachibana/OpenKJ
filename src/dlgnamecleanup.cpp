@@ -150,7 +150,10 @@ void DlgNameCleanup::sizeColumns() {
     // that says whether a row can be trusted, and so the last thing that should
     // need scrolling to. The columns holding a value from a short fixed set get
     // what they need; the three free-text ones share what is left of the width.
-    const int reason = std::max(table->sizeHintForColumn(COL_REASON), header->sectionSizeHint(COL_REASON));
+    // resizeColumnsToContents() has just set every column to its content hint, so the
+    // section size is that hint. Asking the view for it directly is not an option:
+    // QTableView narrows QAbstractItemView::sizeHintForColumn() to protected.
+    const int reason = std::max(header->sectionSize(COL_REASON), header->sectionSizeHint(COL_REASON));
     const int fixed = header->sectionSize(COL_FIELD) + header->sectionSize(COL_SONGS)
                       + header->sectionSize(COL_CONFIDENCE) + reason;
     const int cap = std::max((table->viewport()->width() - fixed) / 3,
