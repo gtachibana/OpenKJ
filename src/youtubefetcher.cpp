@@ -278,11 +278,14 @@ bool YoutubeFetcher::bootstrapAllowed(QDateTime &lastAttempt, const QString &wha
 }
 
 QNetworkReply *YoutubeFetcher::startDownload(const QUrl &url, const QString &what, const int timeoutMs) {
-    if (!m_downloadManager)
+    if (!m_downloadManager) {
         m_downloadManager = new QNetworkAccessManager(this);
+        // Every URL here is a "latest/download" alias that redirects, so redirects have
+        // to be followed - but never one that drops us from https to plaintext.
+        m_downloadManager->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
+    }
 
     QNetworkRequest request(url);
-    request.setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setTransferTimeout(timeoutMs);
     request.setRawHeader("User-Agent", "OpenKJ (https://github.com/gtachibana/OpenKJ)");
 
