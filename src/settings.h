@@ -309,6 +309,20 @@ public:
     // Empty means "the copy shipped next to the binary".
     QString youtubeDlpPath();
     void setYoutubeDlpPath(const QString &path);
+    // The raw setting, empty when the KJ never chose one. youtubeDlpPath() resolves
+    // that emptiness; this is what the settings dialog edits, so tabbing through the
+    // dialog cannot silently promote a resolved default into a chosen path.
+    QString youtubeDlpPathSetting();
+    // True when the KJ pointed at a specific binary, false when the copy next to the
+    // app is used. A missing default copy can be re-downloaded automatically, but a
+    // missing configured path is left alone - the KJ chose it, and it may be a mount
+    // that is simply not up yet.
+    bool youtubeDlpPathConfigured();
+    // Where the automatic download put yt-dlp when the directory next to the app was
+    // not writable. Kept apart from the chosen path so deleting that copy re-arms the
+    // download instead of looking like a deliberate choice that has gone missing.
+    QString youtubeDlpAutoPath();
+    void setYoutubeDlpAutoPath(const QString &path);
     // stable or nightly. Nightly by default because YouTube extractor fixes land
     // there days before they reach a stable release, and a broken extractor during a
     // show is the failure that actually costs the KJ something.
