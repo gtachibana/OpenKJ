@@ -175,6 +175,21 @@ QFileInfoList DlgCdg::getSlideShowImages()
     return images;
 }
 
+const QFileInfoList &DlgCdg::slideShowImages()
+{
+    // Cached because the uncached call is expensive and used to run on every tick of
+    // the slideshow timer: an entryInfoList over the whole directory, then a
+    // QImageReader open-and-sniff of every file in it, on the UI thread, to show one
+    // image. applyBackgroundImageMode() drops the cache, and it is what the background
+    // mode and slideshow directory settings are both wired to.
+    if (!m_slideShowImagesCached)
+    {
+        m_slideShowImages = getSlideShowImages();
+        m_slideShowImagesCached = true;
+    }
+    return m_slideShowImages;
+}
+
 void DlgCdg::showAlert(bool show)
 {
     if ((show) && (m_settings.karaokeAAAlertEnabled()))
@@ -185,6 +200,9 @@ void DlgCdg::showAlert(bool show)
     }
     else
     {
+        // The alert is going away, so the countdown behind it has nothing left to
+        // count - see timerCountdownTimeout(), which stops it when it reaches zero.
+        m_timerAlertCountdown.stop();
         ui->widgetAlert->hide();
         if (m_bmb.hasActiveVideo() && !m_kmb.hasActiveVideo()) {
             ui->videoDisplayBm->show();
@@ -222,6 +240,10 @@ void DlgCdg::timerCountdownTimeout()
     ui->lblSeconds->setText(tr("Starts in: ") + QString::number(m_countdownPos) + tr(" seconds"));
     ui->lblSeconds->repaint();
     ui->widgetAlert->repaint();
+    // Nothing stopped this before, so it went on repainting a hidden widget once a
+    // second for the life of the app after the first alert.
+    if (m_countdownPos == 0)
+        m_timerAlertCountdown.stop();
 }
 
 void DlgCdg::showPitchCue(const int semitones, const bool up)
@@ -277,6 +299,10 @@ void DlgCdg::alertTxtColorChanged(const QColor &color)
 
 void DlgCdg::applyBackgroundImageMode()
 {
+    // This runs on a change of background mode, background image or slideshow
+    // directory, so whatever the cache holds is no longer to be trusted.
+    m_slideShowImagesCached = false;
+    m_slideShowImages.clear();
     if (m_settings.bgMode() == Settings::BgMode::BG_MODE_IMAGE && QFile::exists(m_settings.cdgDisplayBackgroundImage()))
     {
         m_timerSlideShow.stop();
@@ -284,7 +310,12 @@ void DlgCdg::applyBackgroundImageMode()
     }
     else if (m_settings.bgMode() == Settings::BgMode::BG_MODE_SLIDESHOW && QDir(m_settings.bgSlideShowDir()).exists())
     {
-        m_timerSlideShow.start();
+        // With the interval, as the constructor starts it. A bare start() uses
+        // QTimer's default of 0ms, which fires on every pass of the event loop - and
+        // the only thing that ever set the interval afterwards was the settings
+        // spinbox's valueChanged, so switching to slideshow mode span a core until
+        // the KJ happened to touch that spinbox.
+        m_timerSlideShow.start(static_cast<int>(m_settings.slideShowInterval() * 1000));
         slideShowMoveNext();
     }
     else
@@ -305,7 +336,7 @@ void DlgCdg::timerSlideShowTimeout()
 void DlgCdg::slideShowMoveNext()
 {
     m_curSlideshowPos++;
-    auto images = getSlideShowImages();
+    const auto &images = slideShowImages();
     if (images.empty())
     {
         ui->videoDisplayKar->useDefaultBackground();
@@ -316,9 +347,18 @@ void DlgCdg::slideShowMoveNext()
     if (images.at(m_curSlideshowPos).fileName().endsWith("svg", Qt::CaseInsensitive))
     {
         QPixmap bgImage(QSize(1920,1080));
-        QPainter painter(&bgImage);
-        QSvgRenderer renderer(images.at(m_curSlideshowPos).absoluteFilePath());
-        renderer.render(&painter);
+        // A fresh QPixmap holds whatever was in that memory, and an SVG is transparent
+        // wherever its artwork isn't - so without this the singers' screen showed the
+        // uninitialised remains behind the drawing.
+        bgImage.fill(Qt::black);
+        // The painter is scoped so that it is destroyed - and the pixmap released -
+        // before setBackground() copies it. Using a QPixmap while a QPainter is still
+        // active on it is documented as unsupported.
+        {
+            QPainter painter(&bgImage);
+            QSvgRenderer renderer(images.at(m_curSlideshowPos).absoluteFilePath());
+            renderer.render(&painter);
+        }
         ui->videoDisplayKar->setBackground(bgImage);
     }
     else
@@ -373,6 +413,18 @@ void DlgCdg::btnToggleFullscreenClicked()
 
 void DlgCdg::setFullScreen(bool fullScreen)
 {
+    // The setting goes down before the transition, never after. showFullScreen()
+    // delivers showEvent() synchronously on Windows (WM_SHOWWINDOW), and that handler
+    // branches on cdgWindowFullscreen(): left at its old value it took the windowed
+    // branch and called restoreWindowState() - a restoreGeometry() that puts back a
+    // window state of its own - in the middle of the transition it was fighting.
+    //
+    // m_fullscreenTransitionActive is the same guard showEvent()'s own deferred
+    // transitions raise, and it is what keeps that re-entrant call from doing anything
+    // at all rather than merely doing the right thing.
+    m_fullScreen = fullScreen;
+    m_settings.setCdgWindowFullscreen(fullScreen);
+    m_fullscreenTransitionActive = true;
     if (fullScreen)
     {
         // Saved before the transition, never after: saveGeometry() records the window
@@ -395,8 +447,7 @@ void DlgCdg::setFullScreen(bool fullScreen)
 #endif
         m_settings.saveWindowState(this);
     }
-    m_fullScreen = fullScreen;
-    m_settings.setCdgWindowFullscreen(fullScreen);
+    m_fullscreenTransitionActive = false;
     ui->btnToggleFullscreen->setText(fullScreen ? tr("Make Windowed") : tr("Make Fullscreen"));
     auto *currentScreen = screen();
     if (!currentScreen) {

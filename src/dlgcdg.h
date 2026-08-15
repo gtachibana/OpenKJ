@@ -175,7 +175,12 @@ private:
     std::unique_ptr<PitchCueWidget> m_pitchCue;
     std::unique_ptr<CheerWidget> m_cheers;
     Settings m_settings;
+    // Sniffing the slideshow directory costs an open of every file in it, so the
+    // result is held until applyBackgroundImageMode() says it has changed.
+    QFileInfoList m_slideShowImages;
+    bool m_slideShowImagesCached{false};
     void setFullScreen(bool fullScreen);
+    const QFileInfoList &slideShowImages();
 public:
     explicit DlgCdg(MediaBackend &KaraokeBackend, MediaBackend &BreakBackend, QWidget *parent = nullptr,
                     Qt::WindowFlags f = QFlags<Qt::WindowType>());
