@@ -209,7 +209,11 @@ void YoutubeFetcher::refreshAvailability() {
 }
 
 void YoutubeFetcher::probeAvailability() {
-    if (m_versionProcess || m_bootstrapReply || m_ffmpegProcess || m_ffmpegReply)
+    // Every probe and bootstrap this can start, the JS runtime's included - it is the
+    // one pair the guard was missing, so a refresh landing mid-bootstrap would start a
+    // second yt-dlp probe on top of it.
+    if (m_versionProcess || m_bootstrapReply || m_ffmpegProcess || m_ffmpegReply || m_jsRuntimeProcess ||
+        m_jsRuntimeReply)
         return;
     const QString path = dlpPath();
     if (!QFileInfo::exists(path)) {
@@ -225,14 +229,17 @@ void YoutubeFetcher::probeAvailability() {
 
     m_versionProcess = new QProcess(this);
     connect(m_versionProcess, &QProcess::finished, this, [this](const int exitCode, QProcess::ExitStatus) {
-        const QString version = QString::fromUtf8(m_versionProcess->readAllStandardOutput()).trimmed();
+        QProcess *probe = m_versionProcess;
+        if (!probe)
+            return;  // errorOccurred already handled it
+        const QString version = QString::fromUtf8(probe->readAllStandardOutput()).trimmed();
         const bool ok = exitCode == 0 && !version.isEmpty();
         m_version = ok ? version : QString();
         if (ok)
             m_logger->info("{} yt-dlp version: {}", m_loggingPrefix, version);
         else
             m_logger->error("{} yt-dlp did not report a version, exit code {}", m_loggingPrefix, exitCode);
-        m_versionProcess->deleteLater();
+        probe->deleteLater();
         m_versionProcess = nullptr;
         if (ok)
             ensureFfmpeg();
@@ -1012,9 +1019,12 @@ void YoutubeFetcher::runUpdate() {
 
     m_updateProcess = new QProcess(this);
     connect(m_updateProcess, &QProcess::finished, this, [this](const int exitCode, QProcess::ExitStatus) {
-        const QString out = QString::fromUtf8(m_updateProcess->readAllStandardOutput()).trimmed();
-        const QString err = QString::fromUtf8(m_updateProcess->readAllStandardError()).trimmed();
-        m_updateProcess->deleteLater();
+        QProcess *updater = m_updateProcess;
+        if (!updater)
+            return;  // errorOccurred already handled it
+        const QString out = QString::fromUtf8(updater->readAllStandardOutput()).trimmed();
+        const QString err = QString::fromUtf8(updater->readAllStandardError()).trimmed();
+        updater->deleteLater();
         m_updateProcess = nullptr;
         if (exitCode != 0) {
             m_logger->error("{} yt-dlp self-update failed with exit code {}", m_loggingPrefix, exitCode);
