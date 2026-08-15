@@ -2521,12 +2521,18 @@ void MainWindow::rotationDataChanged() {
     }
     if (m_settings.tickerCustomString() != "") {
         tickerText += m_settings.tickerCustomString() + " " + sep + " ";
-        QString cs = (curSingerId >= 0) ? m_rotModel.getSinger(curSingerId).name : QString();
-        if (cs == "") {
-            cs = m_rotModel.getSingerAtPosition(0).name;
-            if (cs == "")
-                cs = "[nobody]";
-        }
+        // Both lookups can miss - an empty rotation, or a current singer id left over in
+        // settings from a singer who has since been deleted - and a miss hands back the
+        // model's placeholder singer, whose name would otherwise land in the ticker.
+        const auto &curSinger = m_rotModel.getSinger(curSingerId);
+        const auto &topSinger = m_rotModel.getSingerAtPosition(0);
+        QString cs;
+        if (curSinger.isValid())
+            cs = curSinger.name;
+        else if (topSinger.isValid())
+            cs = topSinger.name;
+        if (cs == "")
+            cs = "[nobody]";
         QString ns = upcomingSingers.isEmpty() ? "[nobody]" : upcomingSingers.first();
         QString curArtistText = stripBracketedText(ui->labelArtist->text());
         QString curTitleText = stripBracketedText(ui->labelTitle->text());
@@ -5053,6 +5059,13 @@ QString MainWindow::noSongsToPlayMessage() const {
 bool MainWindow::findNextPlayableSinger(const int startPosition, const bool deferCurrentSinger,
                                         okj::RotationSinger &nextSinger, QString &nextSongPath) {
     nextSongPath.clear();
+    // Nobody in the rotation is the same answer as nobody with a playable song, and
+    // bailing here keeps the search below from reaching for a singer at a position that
+    // doesn't exist. That lookup yields the model's placeholder singer, whose id of -1
+    // matches any queue rows orphaned by a deleted singer - so an empty rotation could
+    // otherwise start playing a song that belongs to nobody.
+    if (m_rotModel.singerCount() == 0)
+        return false;
     bool empty{false};
     const int curSingerId = m_rotModel.currentSinger();
     int curPos = startPosition;

@@ -259,6 +259,13 @@ void TableModelQueueSongs::moveSongId(const int songId, const int newPosition) {
 }
 
 int TableModelQueueSongs::add(const int songId) {
+    // No singer loaded in the queue view - loadSinger(-1) is how the rotation clears it,
+    // including just before a singer is deleted. Writing the row anyway keys it to a
+    // singer that doesn't exist, where nothing will ever display it or clean it up.
+    if (m_curSingerId < 0) {
+        m_logger->warn("{} Refusing to queue song id {} with no singer loaded", m_loggingPrefix, songId);
+        return -1;
+    }
     okj::KaraokeSong ksong = m_karaokeSongsModel.getSong(songId);
     QSqlQuery query;
     query.prepare("INSERT INTO queuesongs (singer,song,artist,title,discid,path,keychg,played,position) "
@@ -291,7 +298,8 @@ int TableModelQueueSongs::add(const int songId) {
 }
 
 void TableModelQueueSongs::insert(const int songId, const int position) {
-    add(songId);
+    if (add(songId) == -1)
+        return;
     move(static_cast<int>(m_songs.size()) - 1, position);
 }
 
@@ -394,6 +402,14 @@ bool TableModelQueueSongs::singerHasUnplayedSong(const int singerId, const int s
 }
 
 void TableModelQueueSongs::songAddSlot(int songId, int singerId, int keyChg) {
+    // Callers hand this straight over from lookups that answer -1 on a miss -
+    // getSingerByName() with a name that isn't in the rotation, singerAdd() when the
+    // insert failed - so a bad id has to stop here rather than become a queue row
+    // belonging to nobody.
+    if (singerId < 0) {
+        m_logger->warn("{} Refusing to queue song id {} for invalid singer id {}", m_loggingPrefix, songId, singerId);
+        return;
+    }
     if (singerId == m_curSingerId) {
         int queueSongId = add(songId);
         setKey(queueSongId, keyChg);

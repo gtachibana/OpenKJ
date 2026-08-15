@@ -477,6 +477,17 @@ void TableModelRotation::singerDelete(const int singerId) {
         singer.position = pos++;
     }
     emit layoutChanged();
+    // A singer's queue goes with them. The other two paths that remove singers
+    // (clearRotation() and the clear-database dialog) both drop queuesongs first; without
+    // this one, every deleted singer leaves their rows behind keyed to an id that nothing
+    // will ever hand out again, so they accumulate invisibly for the life of the db.
+    QSqlQuery delQueue;
+    delQueue.prepare("DELETE FROM queuesongs WHERE singer = :singerid");
+    delQueue.bindValue(":singerid", singerId);
+    delQueue.exec();
+    if (auto lastError = delQueue.lastError(); lastError.type() != QSqlError::NoError)
+        m_logger->error("{} DB error! Unable to delete the queue for removed singer id {}! Error: {}",
+                        m_loggingPrefix, singerId, lastError.text());
     emit rotationModified();
     commitChanges();
     outputRotationDebug();
@@ -830,7 +841,10 @@ void TableModelRotation::setRotationTopSingerId(const int id) {
 }
 
 const okj::RotationSinger &TableModelRotation::getSingerAtPosition(int position) const {
-    if (position < 0 || position > m_singers.size() - 1)
+    // The cast is what makes this safe on an empty rotation: size() is unsigned, so
+    // size() - 1 underflows to SIZE_MAX, the int gets promoted for the comparison, and
+    // the guard lets every position through to an at() that throws.
+    if (position < 0 || position >= static_cast<int>(m_singers.size()))
         return InvalidSinger;
     return m_singers.at(position);
 }
@@ -867,7 +881,8 @@ int TableModelRotation::positionTurnDistance(int position) const {
 }
 
 int TableModelRotation::positionWaitTime(int position) const {
-    if (position < 0 || position > m_singers.size() - 1)
+    // Same unsigned underflow as getSingerAtPosition() - see the note there.
+    if (position < 0 || position >= static_cast<int>(m_singers.size()))
         return 0;
 
     const auto &curSinger = getSinger(m_currentSingerId);
