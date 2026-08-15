@@ -19,7 +19,9 @@ public:
      */
     bool moveToNextFrame();
 
-    std::array<uchar, cdg::CDG_IMAGE_SIZE> currentFrame() { return m_current_image_data; }
+    // By reference: the only caller wants .data() to hand to gst_buffer_fill, and
+    // returning by value copied all 56KB of the frame for it, up to 60 times a second.
+    const std::array<uchar, cdg::CDG_IMAGE_SIZE> &currentFrame() const { return m_current_image_data; }
     [[nodiscard]] int currentFrameDurationMS() const;
     [[nodiscard]] int currentFramePositionMS() const;
 
@@ -70,8 +72,9 @@ private:
 
     /**
      * Index of the last read package that caused a visible image change.
+     * -1 means no frame has been seen yet, matching what rewind() sets.
      */
-    int m_last_image_change_pgk_idx{0};
+    int m_last_image_change_pgk_idx{-1};
 };
 
 #endif // CDGFILEREADER_H
