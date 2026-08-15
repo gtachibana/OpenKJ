@@ -1074,6 +1074,23 @@ QJsonObject OpenKJEmbeddedApi::commandSubmitRequest(const QJsonObject &payload)
         return out;
     }
 
+    // That the id parses is not that the song exists. submitRequest is unauthenticated -
+    // it is not in privilegedCommands - and the id goes on to the library model, so an id
+    // for a song that isn't there has to be turned away here, before a singer gets added
+    // to the rotation for a request that cannot be filled. Same check addUserFavorite()
+    // makes below, in the same terms the singers' own clients would get.
+    QSqlQuery songExists;
+    songExists.prepare("SELECT songid FROM dbsongs WHERE songid = :song_id "
+                       "AND discid != '!!DROPPED!!' AND bad = 0");
+    songExists.bindValue(":song_id", songId);
+    if (!songExists.exec() || !songExists.next()) {
+        QJsonObject out;
+        out.insert("command", "submitRequest");
+        out.insert("error", "true");
+        out.insert("errorString", "Unknown songId");
+        return out;
+    }
+
     int singerId = -1;
     if (m_rotationModel.singerExists(singerName)) {
         singerId = m_rotationModel.getSingerByName(singerName).id;
@@ -1848,7 +1865,10 @@ QJsonObject OpenKJEmbeddedApi::moveOwnRequest(const QJsonObject &payload)
         return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
     }
 
-    const int requestId = payload.value("entryId").toString().toInt();
+    // toVariant() so a JSON number is accepted as well as a string - toString() answers
+    // an empty QString for {"entryId": 42}, which becomes 0 and is reported back as a
+    // missing entryId. Every other numeric field on this surface reads the same way.
+    const int requestId = payload.value("entryId").toVariant().toInt();
     if (requestId <= 0) {
         return QJsonObject{{"ok", false}, {"error", "Missing entryId"}};
     }
@@ -3111,7 +3131,8 @@ QJsonObject OpenKJEmbeddedApi::removeOwnRequest(const QJsonObject &payload)
         return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
     }
 
-    const int requestId = payload.value("entryId").toString().toInt();
+    // toVariant() so a JSON number works as well as a string - see moveOwnRequest().
+    const int requestId = payload.value("entryId").toVariant().toInt();
     if (requestId <= 0) {
         return QJsonObject{{"ok", false}, {"error", "Missing entryId"}};
     }
@@ -3138,7 +3159,7 @@ QJsonObject OpenKJEmbeddedApi::runAdminActionRest(const QJsonObject &payload)
     QJsonObject legacyPayload;
     legacyPayload.insert("action", payload.value("type").toString());
     if (payload.contains("entryId")) {
-        legacyPayload.insert("request_id", payload.value("entryId").toString().toInt());
+        legacyPayload.insert("request_id", payload.value("entryId").toVariant().toInt());
     }
     if (payload.contains("value")) {
         legacyPayload.insert("value", payload.value("value"));

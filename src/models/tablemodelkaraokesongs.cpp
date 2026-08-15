@@ -16,6 +16,7 @@
 
 #include "gainlazyupdater.h"
 #include "okjfmt.h"
+#include "okjutil.h"
 
 namespace {
 
@@ -231,14 +232,20 @@ void TableModelKaraokeSongs::loadData() {
     }
     query.exec("SELECT songid,artist,title,discid,duration,filename,path,searchstring,plays,lastplay,gain,bad FROM dbsongs");
     while (query.next()) {
+        // Built once each. Artist, title and discid are all wanted twice - as they are
+        // and lowercased - and asking the query for them a second time constructed a
+        // second QString every time, three per row across a 100k-song load.
+        const QString artist = query.value(1).toString();
+        const QString title = query.value(2).toString();
+        const QString discid = query.value(3).toString();
         const auto &song = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(okj::KaraokeSong{
                 query.value(0).toInt(),
-                query.value(1).toString(),
-                query.value(1).toString().toLower(),
-                query.value(2).toString(),
-                query.value(2).toString().toLower(),
-                query.value(3).toString(),
-                query.value(3).toString().toLower(),
+                artist,
+                artist.toLower(),
+                title,
+                title.toLower(),
+                discid,
+                discid.toLower(),
                 query.value(4).toInt(),
                 query.value(5).toString(),
                 query.value(6).toString(),
@@ -246,7 +253,7 @@ void TableModelKaraokeSongs::loadData() {
                 query.value(8).toInt(),
                 query.value(9).toDateTime(),
                 query.value(11).toBool(),
-                (query.value(3).toString() == "!!DROPPED!!"),
+                (discid == "!!DROPPED!!"),
                 // NULL means never analyzed, which the model shows as blank rather
                 // than as a gain of 0 dB - those are very different things.
                 query.value(10).isNull() ? std::numeric_limits<double>::quiet_NaN()
@@ -404,6 +411,10 @@ QString TableModelKaraokeSongs::getPath(const int songId) {
     auto it = std::find_if(m_allSongs.begin(), m_allSongs.end(), [&songId](const std::shared_ptr<okj::KaraokeSong> &song) {
         return (song->id == songId);
     });
+    if (it == m_allSongs.end()) {
+        m_logger->error("{} getPath called with unknown song id {}", m_loggingPrefix, songId);
+        return {};
+    }
     return it->get()->path;
 }
 
@@ -441,6 +452,14 @@ okj::KaraokeSong &TableModelKaraokeSongs::getSong(const int songId) {
     auto it = std::find_if(m_allSongs.begin(), m_allSongs.end(), [&songId](const std::shared_ptr<okj::KaraokeSong> &song) {
         return (song->id == songId);
     });
+    // A miss used to dereference end() and hand the caller whatever shared_ptr sat one
+    // past the end of the vector - and callers copy the result, so it went on to
+    // manipulate QString refcounts through that pointer. Song ids arrive here from the
+    // network, so a miss is an ordinary event, not a programming error.
+    if (it == m_allSongs.end()) {
+        m_logger->error("{} getSong called with unknown song id {}", m_loggingPrefix, songId);
+        return InvalidSong;
+    }
     return **it;
 }
 
@@ -473,6 +492,10 @@ void TableModelKaraokeSongs::resizeIconsForFont(const QFont &font) {
 
 QMimeData *TableModelKaraokeSongs::mimeData(const QModelIndexList &indexes) const {
     auto *mimeData = new QMimeData();
+    // Guarded like TableModelRotation::mimeData(). Two of the four models checked and
+    // two dereferenced element 0 of a list Qt does not promise to be non-empty.
+    if (indexes.isEmpty())
+        return mimeData;
     mimeData->setData("integer/songid",
                       data(indexes.at(0).sibling(indexes.at(0).row(), COL_ID), Qt::DisplayRole).toByteArray().data());
     return mimeData;
@@ -621,34 +644,11 @@ TableModelKaraokeSongs::DeleteStatus TableModelKaraokeSongs::removeBadSong(QStri
 
 QString TableModelKaraokeSongs::findCdgAudioFile(const QString &path) {
     m_logger->debug("{} findMatchingAudioFile({}) called", m_loggingPrefix, path.toStdString());
-    std::array<QString, 41> audioExtensions{
-            "mp3",
-            "ogg",
-            "wav",
-            "mov",
-            "flac",
-            "MP3",
-            "WAV",
-            "OGG",
-            "MOV",
-            "FLAC",
-            "Mp3","mP3",
-            "Wav","wAv","waV","WAv","wAV","WaV",
-            "Ogg","oGg","ogG","OGg","oGG","OgG",
-            "Mov","mOv","moV","MOv","mOV","MoV",
-            "Flac","fLac","flAc","flaC","FLac","FLAc",
-            "flAC","fLAC","FlaC", "FLaC", "FlAC"
-    };
-    QFileInfo cdgInfo(path);
-    for (const auto &ext : audioExtensions) {
-        // '/' rather than QDir::separator() - see findMatchingAudioFile() in
-        // okjutil.h; a native separator spliced into a forward-slash path makes
-        // a later case-only rename of this file look like a name collision.
-        QString testPath = cdgInfo.absolutePath() + '/' + cdgInfo.completeBaseName() + '.' + ext;
-        if (QFile::exists(testPath))
-            return testPath;
-    }
-    return {};
+    // This was a verbatim second copy of findMatchingAudioFile(): the same 41-element
+    // case-permutation array, the same loop, and a comment pointing at the original
+    // rather than calling it. Two copies of a search order is one too many for the
+    // next person who has to add an extension to it.
+    return findMatchingAudioFile(path);
 }
 
 int TableModelKaraokeSongs::addSong(okj::KaraokeSong song) {

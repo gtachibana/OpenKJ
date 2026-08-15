@@ -58,6 +58,10 @@ namespace okj {
         QString searchAll;
         QString searchArtist;
         QString searchTitle;
+        // Song ids come from dbsongs.songid, which is a rowid alias and so always
+        // positive. A default-constructed song, and the invalid song the library model
+        // hands back for an id it does not hold, both fail this.
+        [[nodiscard]] bool isValid() const { return id > 0; }
     };
 
     struct HistorySinger {
