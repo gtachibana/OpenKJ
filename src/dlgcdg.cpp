@@ -157,21 +157,9 @@ void DlgCdg::tickerEnableChanged()
 
 void DlgCdg::mouseDoubleClickEvent([[maybe_unused]]QMouseEvent *e)
 {
-    m_fullScreen = !m_fullScreen;
-    if (m_fullScreen)
-        showFullScreen();
-    else
-        showNormal();
-    cdgOffsetsChanged();
-    m_settings.setCdgWindowFullscreen(m_fullScreen);
-    m_settings.saveWindowState(this);
-    auto *currentScreen = screen();
-    if (!currentScreen) {
-        currentScreen = QGuiApplication::primaryScreen();
-    }
-    if (currentScreen) {
-        m_settings.setCdgWindowFullscreenMonitor(QGuiApplication::screens().indexOf(currentScreen));
-    }
+    // Driven off the window's real state rather than off m_fullScreen, so a window that
+    // somehow got out of sync with the flag still toggles the way the user sees it.
+    setFullScreen(!isFullScreen());
 }
 
 QFileInfoList DlgCdg::getSlideShowImages()
@@ -380,9 +368,18 @@ void DlgCdg::timer1sTimeout()
 
 void DlgCdg::btnToggleFullscreenClicked()
 {
-    m_fullScreen = !m_fullScreen;
-    if (m_fullScreen)
+    setFullScreen(!isFullScreen());
+}
+
+void DlgCdg::setFullScreen(bool fullScreen)
+{
+    if (fullScreen)
     {
+        // Saved before the transition, never after: saveGeometry() records the window
+        // state along with the rectangle, so a blob written while fullscreen puts the
+        // window straight back into fullscreen the next time it is restored - even when
+        // cdgWindowFullscreen says windowed, leaving a window nobody can move.
+        m_settings.saveWindowState(this);
         showFullScreen();
 #ifdef Q_OS_WIN
         SetWindowPos(reinterpret_cast<HWND>(winId()), HWND_TOPMOST, 0, 0, 0, 0,
@@ -396,9 +393,11 @@ void DlgCdg::btnToggleFullscreenClicked()
         SetWindowPos(reinterpret_cast<HWND>(winId()), HWND_NOTOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 #endif
+        m_settings.saveWindowState(this);
     }
-    m_settings.setCdgWindowFullscreen(m_fullScreen);
-    m_settings.saveWindowState(this);
+    m_fullScreen = fullScreen;
+    m_settings.setCdgWindowFullscreen(fullScreen);
+    ui->btnToggleFullscreen->setText(fullScreen ? tr("Make Windowed") : tr("Make Fullscreen"));
     auto *currentScreen = screen();
     if (!currentScreen) {
         currentScreen = QGuiApplication::primaryScreen();
@@ -472,13 +471,39 @@ void DlgCdg::showEvent(QShowEvent *event)
     {
         m_settings.restoreWindowState(this);
         ui->btnToggleFullscreen->setText("Make Fullscreen");
+        m_fullScreen = false;
+        if (isFullScreen())
+        {
+            // The restored blob carried a fullscreen state (older builds saved one, and
+            // any settings file written by them still has it). Left alone it hands back a
+            // window with no title bar to drag and no way to resize, while every other
+            // piece of state here says windowed. Undo it on the next tick, for the same
+            // re-entrance reason the fullscreen path above defers.
+            m_fullscreenTransitionActive = true;
+            QTimer::singleShot(0, this, [this] () {
+                showNormal();
+#ifdef Q_OS_WIN
+                SetWindowPos(reinterpret_cast<HWND>(this->winId()), HWND_NOTOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
+                m_fullscreenTransitionActive = false;
+                // Rewrites the blob without the fullscreen state, so this only ever
+                // has to happen once per settings file.
+                m_settings.saveWindowState(this);
+                cdgOffsetsChanged();
+            });
+        }
     }
     emit visibilityChanged(true);
 }
 
 void DlgCdg::hideEvent(QHideEvent *event)
 {
-    m_settings.saveWindowState(this);
+    // Only the windowed geometry is worth keeping - see setFullScreen(). Hiding a
+    // fullscreen window is routine (the toggle button, closing it between shows), and
+    // saving here would poison the blob the windowed path restores from.
+    if (!isFullScreen())
+        m_settings.saveWindowState(this);
     QWidget::hideEvent(event);
 }
 
