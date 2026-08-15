@@ -486,7 +486,11 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
                                      "Requires yt-dlp, which downloads the video to this machine before it plays."));
     auto *ytLayout = new QFormLayout(m_groupBoxYoutube);
 
-    m_lineEditDlpPath = new QLineEdit(m_settings.youtubeDlpPath(), m_groupBoxYoutube);
+    // Shows only what the KJ actually chose. Leaving the resolved path in here would
+    // mean tabbing past the field wrote it back as a deliberate choice, and a chosen
+    // path is never auto-downloaded to.
+    m_lineEditDlpPath = new QLineEdit(m_settings.youtubeDlpPathSetting(), m_groupBoxYoutube);
+    m_lineEditDlpPath->setPlaceholderText(m_settings.youtubeDlpPath());
     auto *dlpRow = new QHBoxLayout;
     auto *dlpBrowse = new QPushButton(tr("Browse..."), m_groupBoxYoutube);
     dlpRow->addWidget(m_lineEditDlpPath);
@@ -592,8 +596,13 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
         m_settings.setYoutubeRequestsEnabled(enabled);
         // start() reads the setting and either spins the fetcher up - probe, resume
         // anything left pending, arm the timeout sweep - or shuts it back down.
-        if (m_youtubeFetcher)
+        if (m_youtubeFetcher) {
+            // Switching the feature back on is the KJ saying "try that again", so a
+            // download that failed earlier gets another go without waiting out its backoff.
+            if (enabled)
+                m_youtubeFetcher->resetBootstrapCooldowns();
             m_youtubeFetcher->start();
+        }
         refreshDlpStatusLabel();
     });
     connect(dlpBrowse, &QPushButton::clicked, this, [this]() {
@@ -607,7 +616,13 @@ void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
             m_youtubeFetcher->refreshAvailability();
     });
     connect(m_lineEditDlpPath, &QLineEdit::editingFinished, this, [this]() {
-        m_settings.setYoutubeDlpPath(m_lineEditDlpPath->text().trimmed());
+        const QString path = m_lineEditDlpPath->text().trimmed();
+        if (path == m_settings.youtubeDlpPathSetting())
+            return;
+        m_settings.setYoutubeDlpPath(path);
+        // Clearing the field hands control back to the automatic copy, so show where
+        // that now resolves to.
+        m_lineEditDlpPath->setPlaceholderText(m_settings.youtubeDlpPath());
         if (m_youtubeFetcher)
             m_youtubeFetcher->refreshAvailability();
     });
@@ -668,6 +683,46 @@ void DlgSettings::setYoutubeFetcher(YoutubeFetcher *fetcher)
     connect(m_youtubeFetcher, &YoutubeFetcher::availabilityChanged, this, [this](bool) {
         refreshDlpStatusLabel();
     });
+    connect(m_youtubeFetcher, &YoutubeFetcher::bootstrapStarted, this, [this]() {
+        if (m_labelDlpStatus)
+            m_labelDlpStatus->setText(tr("Downloading yt-dlp..."));
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::bootstrapFinished, this, [this](const bool ok) {
+        refreshDlpStatusLabel();
+        if (!ok && m_labelDlpStatus)
+            m_labelDlpStatus->setText(tr("<b>Download failed.</b> Check the internet connection, or point this at a copy you downloaded."));
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::ffmpegBootstrapStarted, this, [this]() {
+        if (m_labelDlpStatus)
+            m_labelDlpStatus->setText(tr("Downloading ffmpeg (needed by yt-dlp)..."));
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::ffmpegBootstrapFinished, this, [this](const bool ok) {
+        refreshDlpStatusLabel();
+        if (!ok && m_labelDlpStatus)
+            m_labelDlpStatus->setText(tr("<b>ffmpeg download failed.</b> Install ffmpeg and put it next to yt-dlp or on the PATH."));
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::jsRuntimeBootstrapStarted, this, [this]() {
+        if (m_labelDlpStatus)
+            m_labelDlpStatus->setText(tr("Downloading Deno (needed for YouTube's player challenge)..."));
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::jsRuntimeBootstrapFinished, this, [this](const bool) {
+        // Never fatal - refreshDlpStatusLabel() reports it as a caveat on a ready feature.
+        refreshDlpStatusLabel();
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::jsRuntimeAvailabilityChanged, this, [this](bool) {
+        // Also covers the case where one was found beside yt-dlp or on PATH, so no
+        // download ran and jsRuntimeBootstrapFinished never fired.
+        refreshDlpStatusLabel();
+    });
+    connect(m_youtubeFetcher, &YoutubeFetcher::bootstrapProgress, this,
+            [this](const QString &what, const int percent) {
+        if (!m_labelDlpStatus)
+            return;
+        if (percent < 0)
+            m_labelDlpStatus->setText(tr("Downloading %1...").arg(what));
+        else
+            m_labelDlpStatus->setText(tr("Downloading %1... %2%").arg(what).arg(percent));
+    });
     connect(m_youtubeFetcher, &YoutubeFetcher::updateFinished, this, [this](const bool ok, const QString &message) {
         if (m_buttonDlpUpdate)
             m_buttonDlpUpdate->setEnabled(true);
@@ -689,12 +744,39 @@ void DlgSettings::refreshDlpStatusLabel()
         m_labelDlpStatus->setText(tr("Unavailable in this mode."));
         return;
     }
+    if (m_youtubeFetcher->isBootstrapping()) {
+        m_labelDlpStatus->setText(tr("Downloading yt-dlp..."));
+        return;
+    }
+    if (m_youtubeFetcher->isFfmpegBootstrapping()) {
+        m_labelDlpStatus->setText(tr("Downloading ffmpeg (needed by yt-dlp)..."));
+        return;
+    }
+    if (m_youtubeFetcher->isJsRuntimeBootstrapping()) {
+        m_labelDlpStatus->setText(tr("Downloading Deno (needed for YouTube's player challenge)..."));
+        return;
+    }
     if (!QFileInfo::exists(m_settings.youtubeDlpPath())) {
         m_labelDlpStatus->setText(tr("<b>Not found.</b> Download yt-dlp and point this at it."));
         return;
     }
     if (!m_youtubeFetcher->isAvailable()) {
-        m_labelDlpStatus->setText(tr("<b>Found but not responding.</b> Requests are refused until it works."));
+        if (!m_youtubeFetcher->version().isEmpty()) {
+            m_labelDlpStatus->setText(tr("<b>yt-dlp ready, but ffmpeg is missing.</b>\n"
+                                         "ffmpeg merges the video and audio. If the automatic download failed, "
+                                         "install it and put it next to yt-dlp or on the PATH."));
+        } else {
+            m_labelDlpStatus->setText(tr("<b>Found but not responding.</b> Requests are refused until it works."));
+        }
+        return;
+    }
+    if (!m_youtubeFetcher->jsRuntimeAvailable()) {
+        // Worth saying out loud: fetches still work, they just lose the formats that sit
+        // behind YouTube's player challenge, which looks like "some videos come out worse".
+        m_labelDlpStatus->setText(tr("Ready - version %1, but no JS runtime.\n"
+                                     "Some formats will be unavailable. Install Deno, or put it "
+                                     "next to yt-dlp, to get all of them.")
+                                          .arg(m_youtubeFetcher->version()));
         return;
     }
     m_labelDlpStatus->setText(tr("Ready - version %1").arg(m_youtubeFetcher->version()));

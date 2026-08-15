@@ -28,6 +28,7 @@
 #include "simplecrypt.h"
 #include <QStandardPaths>
 #include <QDir>
+#include <QFileInfo>
 #include <QDataStream>
 #include <QFontDatabase>
 #include <QUuid>
@@ -1800,6 +1801,11 @@ QString Settings::youtubeDlpPath()
     const QString configured = scopedValue("youtubeDlpPath", "", false, LocalMode).toString().trimmed();
     if (!configured.isEmpty())
         return configured;
+    // Only trust the auto-installed copy while it is actually there. If it was cleaned
+    // up, falling back to the default location is what lets the download run again.
+    const QString automatic = youtubeDlpAutoPath();
+    if (!automatic.isEmpty() && QFileInfo::exists(automatic))
+        return automatic;
 #ifdef Q_OS_WIN
     return QCoreApplication::applicationDirPath() + QDir::separator() + "yt-dlp.exe";
 #else
@@ -1810,6 +1816,26 @@ QString Settings::youtubeDlpPath()
 void Settings::setYoutubeDlpPath(const QString &path)
 {
     setScopedValue("youtubeDlpPath", path.trimmed(), LocalMode);
+}
+
+QString Settings::youtubeDlpPathSetting()
+{
+    return scopedValue("youtubeDlpPath", "", false, LocalMode).toString().trimmed();
+}
+
+bool Settings::youtubeDlpPathConfigured()
+{
+    return !youtubeDlpPathSetting().isEmpty();
+}
+
+QString Settings::youtubeDlpAutoPath()
+{
+    return scopedValue("youtubeDlpAutoPath", "", false, LocalMode).toString().trimmed();
+}
+
+void Settings::setYoutubeDlpAutoPath(const QString &path)
+{
+    setScopedValue("youtubeDlpAutoPath", path.trimmed(), LocalMode);
 }
 
 QString Settings::youtubeDlpChannel()

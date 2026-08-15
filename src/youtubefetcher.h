@@ -3,12 +3,16 @@
 
 #include <QDateTime>
 #include <QHash>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QObject>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QQueue>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QUrl>
 #include <QVector>
 #include <spdlog/spdlog.h>
 #include <spdlog/async_logger.h>
@@ -99,10 +103,37 @@ public:
     // call before the cache directory exists.
     void start();
 
-    // False when yt-dlp is missing or unusable. The embedded API reports this as a
+    // False when yt-dlp is missing or unusable, or when ffmpeg has not been found
+    // (beside yt-dlp, on PATH, or auto-downloaded) - without ffmpeg the DASH merge the
+    // fetch format prefers fails every time. The embedded API reports this as a
     // capability so the feature disappears from the phones rather than offering a
     // button that will always fail.
     [[nodiscard]] bool isAvailable() const { return m_available; }
+
+    // True while a missing default yt-dlp copy is being downloaded.
+    [[nodiscard]] bool isBootstrapping() const { return m_bootstrapReply != nullptr; }
+
+    // True while a missing ffmpeg is being downloaded and extracted.
+    [[nodiscard]] bool isFfmpegBootstrapping() const { return m_ffmpegReply != nullptr; }
+
+    // True while a missing JS runtime is being downloaded and extracted.
+    [[nodiscard]] bool isJsRuntimeBootstrapping() const { return m_jsRuntimeReply != nullptr; }
+
+    // Whether a JS runtime (Deno) was found beside yt-dlp, on PATH, or auto-downloaded.
+    // Deliberately not part of isAvailable(): YouTube's player challenge needs it to
+    // reach the better formats, but yt-dlp degrades rather than failing outright, so a
+    // venue that cannot fetch it still gets a working feature.
+    [[nodiscard]] bool jsRuntimeAvailable() const { return m_jsRuntimeAvailable; }
+
+    // Clears the per-binary download backoff. Called when the KJ re-enables the feature,
+    // which is the one unambiguous "try that again" gesture the dialog offers.
+    void resetBootstrapCooldowns();
+
+    // Whether a usable ffmpeg was found beside yt-dlp, on PATH, or auto-downloaded.
+    // isAvailable() is gated on this too - without it the DASH merge the fetch format
+    // prefers fails every time, so advertising the feature is only honest once both
+    // binaries are in place.
+    [[nodiscard]] bool ffmpegAvailable() const { return m_ffmpegAvailable; }
 
     // Where a video will live once fetched. Deterministic and known before the
     // download starts, which is what lets the dbsongs row be written up front.
@@ -146,6 +177,26 @@ signals:
     // Outcome of an update attempt, so the settings dialog can report it. Also fires
     // for the automatic post-breakage update, which is worth surfacing.
     void updateFinished(bool ok, const QString &message);
+    // Download of the default yt-dlp copy kicked off, and its outcome. The settings
+    // dialog shows "downloading" while this runs so the status line does not sit on
+    // "not found" for a binary that is on its way.
+    void bootstrapStarted();
+    void bootstrapFinished(bool ok);
+    // Same, for the ffmpeg that yt-dlp needs to merge the DASH streams this feature
+    // requests. Fires after the yt-dlp probe succeeds, when ffmpeg is neither beside
+    // yt-dlp nor on PATH.
+    void ffmpegBootstrapStarted();
+    void ffmpegBootstrapFinished(bool ok);
+    // Same again for the JS runtime yt-dlp needs to solve YouTube's player challenge.
+    // Availability changes separately from the download outcome: it also flips when one
+    // is found beside yt-dlp or on PATH, where no download ever runs.
+    void jsRuntimeBootstrapStarted();
+    void jsRuntimeBootstrapFinished(bool ok);
+    void jsRuntimeAvailabilityChanged(bool available);
+    // Percentage for whichever binary is currently coming down, so a KJ watching a
+    // 100 MB archive arrive on venue wifi can tell it from a hang. -1 when the server
+    // sent no content length. `what` is the binary's name, ready for a status line.
+    void bootstrapProgress(const QString &what, int percent);
 
 private slots:
     // Connected to every fetch process. The job is recovered from the sender's
@@ -173,12 +224,24 @@ private:
     std::shared_ptr<spdlog::logger> m_logger;
 
     bool m_available{false};
+    bool m_ffmpegAvailable{false};
+    bool m_jsRuntimeAvailable{false};
     QString m_version;
     QQueue<QString> m_queued;
     QHash<QString, Job *> m_active;
     QProcess *m_versionProcess{nullptr};
     QProcess *m_updateProcess{nullptr};
+    QProcess *m_ffmpegProcess{nullptr};
+    QProcess *m_jsRuntimeProcess{nullptr};
+    QNetworkAccessManager *m_downloadManager{nullptr};
+    QNetworkReply *m_bootstrapReply{nullptr};
+    QNetworkReply *m_ffmpegReply{nullptr};
+    QNetworkReply *m_jsRuntimeReply{nullptr};
     QDateTime m_lastUpdateAttempt;
+    // One per binary, so a failed ffmpeg fetch does not also block yt-dlp's.
+    QDateTime m_lastDlpBootstrap;
+    QDateTime m_lastFfmpegBootstrap;
+    QDateTime m_lastJsRuntimeBootstrap;
     QTimer m_sweepTimer;
 
     // A stalled download must not hold a rotation slot hostage for the whole show.
@@ -188,6 +251,10 @@ private:
     static constexpr int kUpdateCooldownSecs = 3600;
     // A failed fetch is retried once, and only after a successful self-update.
     static constexpr int kMaxAttempts = 2;
+    // A failed download is not retried for this long. Without it, every probe - and the
+    // settings dialog fires one whenever the path field loses focus - would restart a
+    // 100 MB archive from zero on a connection that has already shown it cannot take it.
+    static constexpr int kBootstrapCooldownSecs = 900;
 
     [[nodiscard]] QString dlpPath() const;
     [[nodiscard]] bool ensureCacheDir() const;
@@ -196,6 +263,43 @@ private:
 
     void probeAvailability();
     void setAvailable(bool available);
+    void startBootstrap();
+    void onBootstrapFinished();
+    [[nodiscard]] QUrl bootstrapUrl() const;
+    bool writeBootstrapBinary(const QString &path, const QByteArray &data);
+    // ffmpeg is what yt-dlp merges DASH video+audio with, and it looks for it next to
+    // its own binary or on PATH. When neither holds one, fetch it (Windows and macOS)
+    // and put it beside yt-dlp so the merge works without the KJ touching anything.
+    void ensureFfmpeg();
+    void startFfmpegBootstrap();
+    void onFfmpegDownloadFinished();
+    [[nodiscard]] QUrl ffmpegUrl() const;
+    [[nodiscard]] QString binaryBesideDlp(const QString &name) const;
+    [[nodiscard]] QString ffmpegBesidePath() const;
+    // yt-dlp's post-merge fixups shell out to ffprobe. It rides along in the Windows
+    // archive, so it lands beside ffmpeg without a second download.
+    [[nodiscard]] QString ffprobeBesidePath() const;
+    // Deno. YouTube's player challenge is solved by running the site's own JavaScript,
+    // and yt-dlp needs an external runtime for it - without one the good formats quietly
+    // stop being offered. Every Deno release asset is a zip holding one static binary,
+    // on every platform, so unlike ffmpeg this can be offered on Linux too.
+    [[nodiscard]] QString jsRuntimeBesidePath() const;
+    void ensureJsRuntime();
+    void setJsRuntimeAvailable(bool available);
+    void startJsRuntimeBootstrap();
+    void onJsRuntimeDownloadFinished();
+    [[nodiscard]] QUrl jsRuntimeUrl() const;
+    // Pulls one named file out of an in-memory zip, ignoring the directory the build
+    // wraps around it. Goes through QSaveFile rather than miniz's own stdio path, which
+    // would mangle a target path the local 8-bit codec cannot represent.
+    bool extractZipBinary(const QByteArray &zipData, const QString &memberName, const QString &targetPath);
+    // ffmpeg plus the ffprobe that rides along in the same archive.
+    bool extractFfmpeg(const QByteArray &zipData, const QString &targetPath);
+    // Environment for a spawned yt-dlp: our own binary directory first on PATH.
+    [[nodiscard]] QProcessEnvironment childEnvironment() const;
+    // Shared download plumbing - progress relay and the per-binary backoff.
+    QNetworkReply *startDownload(const QUrl &url, const QString &what, int timeoutMs);
+    bool bootstrapAllowed(QDateTime &lastAttempt, const QString &what);
     void dispatchNext();
     void startJob(const QString &videoId, int songId);
     void finishJob(Job *job, bool ok, const QString &error);

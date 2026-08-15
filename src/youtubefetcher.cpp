@@ -1,13 +1,19 @@
 #include "youtubefetcher.h"
 
 #include <algorithm>
+#include <cstring>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QStandardPaths>
+#include <QSysInfo>
 #include <QVariant>
+#include <miniz/miniz.h>
 
 #include "settings.h"
 #include "tagreader.h"
@@ -61,6 +67,20 @@ namespace {
         return YoutubeFetcher::State::Pending;
     }
 
+    // Size floors for the binaries we download. An HTML error page served with a 200,
+    // or a zip that turned out to hold only READMEs, must never be left on disk looking
+    // like the real thing - the probe would then "find" it and the feature would wedge
+    // permanently, since a file that exists is never re-downloaded.
+    constexpr qint64 kMinDlpSize = 1024 * 1024;
+    constexpr qint64 kMinExtractedSize = 5 * 1024 * 1024;
+
+    // The PyInstaller and static builds both need their executable bits on Unix.
+    void setExecutable(const QString &path) {
+        QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
+                                    QFile::ReadUser | QFile::WriteUser | QFile::ExeUser |
+                                    QFile::ReadGroup | QFile::ExeGroup | QFile::ReadOther | QFile::ExeOther);
+    }
+
 }
 
 bool isValidYoutubeVideoId(const QString &videoId) {
@@ -104,6 +124,21 @@ YoutubeFetcher::YoutubeFetcher(Settings &settings, QObject *parent)
 
 YoutubeFetcher::~YoutubeFetcher() {
     m_sweepTimer.stop();
+    // Probes and downloads are cheap to redo on the next launch, and a QProcess still
+    // running when its parent goes away prints a warning and blocks in its destructor.
+    for (auto *probe: {m_versionProcess, m_ffmpegProcess, m_jsRuntimeProcess}) {
+        if (probe) {
+            probe->disconnect(this);
+            probe->kill();
+            probe->waitForFinished(1000);
+        }
+    }
+    for (auto *reply: {m_bootstrapReply, m_ffmpegReply, m_jsRuntimeReply}) {
+        if (reply) {
+            reply->disconnect(this);
+            reply->abort();
+        }
+    }
     // Downloads are resumable and the rows go back to pending on the next launch, so
     // killing them outright beats holding up shutdown.
     for (auto *job: m_active) {
@@ -125,6 +160,8 @@ void YoutubeFetcher::start() {
         // dispatched and the timeout sweep stops. Downloads already running are left
         // to finish, since their rows are already queued against a singer.
         m_sweepTimer.stop();
+        m_ffmpegAvailable = false;
+        setJsRuntimeAvailable(false);
         setAvailable(false);
         return;
     }
@@ -163,7 +200,7 @@ void YoutubeFetcher::setAvailable(const bool available) {
     if (m_available == available)
         return;
     m_available = available;
-    m_logger->info("{} yt-dlp availability changed to: {}", m_loggingPrefix, available);
+    m_logger->info("{} YouTube feature availability changed to: {}", m_loggingPrefix, available);
     emit availabilityChanged(available);
 }
 
@@ -172,13 +209,17 @@ void YoutubeFetcher::refreshAvailability() {
 }
 
 void YoutubeFetcher::probeAvailability() {
-    if (m_versionProcess)
+    if (m_versionProcess || m_bootstrapReply || m_ffmpegProcess || m_ffmpegReply)
         return;
     const QString path = dlpPath();
     if (!QFileInfo::exists(path)) {
         m_logger->warn("{} yt-dlp not found at: {}", m_loggingPrefix, path);
         m_version.clear();
         setAvailable(false);
+        // The default copy next to the binary is ours to fetch. A path the KJ chose
+        // is left alone - they may be pointing at a mount that is not up yet.
+        if (m_settings.youtubeRequestsEnabled() && !m_settings.youtubeDlpPathConfigured())
+            startBootstrap();
         return;
     }
 
@@ -193,9 +234,10 @@ void YoutubeFetcher::probeAvailability() {
             m_logger->error("{} yt-dlp did not report a version, exit code {}", m_loggingPrefix, exitCode);
         m_versionProcess->deleteLater();
         m_versionProcess = nullptr;
-        setAvailable(ok);
         if (ok)
-            resumePending();
+            ensureFfmpeg();
+        else
+            setAvailable(false);
     });
     connect(m_versionProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
         m_logger->error("{} Could not run yt-dlp at: {}", m_loggingPrefix, dlpPath());
@@ -208,6 +250,488 @@ void YoutubeFetcher::probeAvailability() {
     m_versionProcess->start(path, {QStringLiteral("--version")});
 }
 
+QUrl YoutubeFetcher::bootstrapUrl() const {
+#ifdef Q_OS_WIN
+    return QUrl(QStringLiteral("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"));
+#elif defined(Q_OS_MACOS)
+    return QUrl(QStringLiteral("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"));
+#else
+    return QUrl(QStringLiteral("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"));
+#endif
+}
+
+void YoutubeFetcher::resetBootstrapCooldowns() {
+    m_lastDlpBootstrap = QDateTime();
+    m_lastFfmpegBootstrap = QDateTime();
+    m_lastJsRuntimeBootstrap = QDateTime();
+}
+
+bool YoutubeFetcher::bootstrapAllowed(QDateTime &lastAttempt, const QString &what) {
+    const QDateTime now = QDateTime::currentDateTime();
+    if (lastAttempt.isValid() && lastAttempt.secsTo(now) < kBootstrapCooldownSecs) {
+        m_logger->info("{} Not retrying the {} download yet, the last attempt was {}s ago",
+                       m_loggingPrefix, what.toStdString(), lastAttempt.secsTo(now));
+        return false;
+    }
+    lastAttempt = now;
+    return true;
+}
+
+QNetworkReply *YoutubeFetcher::startDownload(const QUrl &url, const QString &what, const int timeoutMs) {
+    if (!m_downloadManager) {
+        m_downloadManager = new QNetworkAccessManager(this);
+        // Every URL here is a "latest/download" alias that redirects, so redirects have
+        // to be followed - but never one that drops us from https to plaintext.
+        m_downloadManager->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
+    }
+
+    QNetworkRequest request(url);
+    request.setTransferTimeout(timeoutMs);
+    request.setRawHeader("User-Agent", "OpenKJ (https://github.com/gtachibana/OpenKJ)");
+
+    QNetworkReply *reply = m_downloadManager->get(request);
+    connect(reply, &QNetworkReply::downloadProgress, this, [this, what](const qint64 received, const qint64 total) {
+        emit bootstrapProgress(what, total > 0 ? static_cast<int>((received * 100) / total) : -1);
+    });
+    return reply;
+}
+
+void YoutubeFetcher::startBootstrap() {
+    if (m_bootstrapReply)
+        return;
+
+    const QUrl url = bootstrapUrl();
+    if (!url.isValid()) {
+        m_logger->error("{} No yt-dlp download URL for this platform", m_loggingPrefix);
+        return;
+    }
+    const QString dir = QFileInfo(dlpPath()).absolutePath();
+    if (!QFileInfo::exists(dir) && !QDir().mkpath(dir)) {
+        m_logger->error("{} Could not create the yt-dlp download directory: {}", m_loggingPrefix, dir);
+        return;
+    }
+    if (!bootstrapAllowed(m_lastDlpBootstrap, QStringLiteral("yt-dlp")))
+        return;
+
+    m_logger->info("{} yt-dlp is missing, downloading {}", m_loggingPrefix, url.toString().toStdString());
+    m_bootstrapReply = startDownload(url, QStringLiteral("yt-dlp"), 120000);
+    connect(m_bootstrapReply, &QNetworkReply::finished, this, &YoutubeFetcher::onBootstrapFinished);
+    emit bootstrapStarted();
+}
+
+void YoutubeFetcher::onBootstrapFinished() {
+    QNetworkReply *reply = m_bootstrapReply;
+    m_bootstrapReply = nullptr;
+
+    if (reply->error() != QNetworkReply::NoError) {
+        m_logger->error("{} yt-dlp download failed: {}", m_loggingPrefix, reply->errorString().toStdString());
+        reply->deleteLater();
+        emit bootstrapFinished(false);
+        return;
+    }
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    // Writing a truncated body or an error page would leave a file that exists, which is
+    // the one state that stops the probe from ever downloading again.
+    if (data.size() < kMinDlpSize) {
+        m_logger->error("{} yt-dlp download was only {} bytes, discarding it", m_loggingPrefix, data.size());
+        emit bootstrapFinished(false);
+        return;
+    }
+
+    const QString path = dlpPath();
+    if (writeBootstrapBinary(path, data)) {
+        m_logger->info("{} Downloaded yt-dlp to {}", m_loggingPrefix, path.toStdString());
+        emit bootstrapFinished(true);
+        refreshAvailability();
+        return;
+    }
+
+    // The directory next to the app is often not writable - Program Files, a bundled
+    // .app on macOS. Fall back to the per-user app data dir and remember it, so the
+    // next probe finds it without the KJ having to touch settings.
+    const QString fallback = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+                                     .filePath(QFileInfo(path).fileName());
+    if (QDir().mkpath(QFileInfo(fallback).absolutePath()) && writeBootstrapBinary(fallback, data)) {
+        m_settings.setYoutubeDlpAutoPath(fallback);
+        m_logger->info("{} Downloaded yt-dlp to {}", m_loggingPrefix, fallback.toStdString());
+        emit bootstrapFinished(true);
+        refreshAvailability();
+        return;
+    }
+
+    m_logger->error("{} Could not write yt-dlp to {} or {}", m_loggingPrefix, path.toStdString(), fallback.toStdString());
+    emit bootstrapFinished(false);
+}
+
+bool YoutubeFetcher::writeBootstrapBinary(const QString &path, const QByteArray &data) {
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
+        m_logger->error("{} Could not write yt-dlp to {}: {}",
+                        m_loggingPrefix, path.toStdString(), file.errorString().toStdString());
+        return false;
+    }
+    setExecutable(path);
+    return true;
+}
+
+QString YoutubeFetcher::binaryBesideDlp(const QString &name) const {
+    const QDir dir(QFileInfo(dlpPath()).absolutePath());
+#ifdef Q_OS_WIN
+    return dir.filePath(name + QStringLiteral(".exe"));
+#else
+    return dir.filePath(name);
+#endif
+}
+
+QString YoutubeFetcher::ffmpegBesidePath() const {
+    return binaryBesideDlp(QStringLiteral("ffmpeg"));
+}
+
+QString YoutubeFetcher::ffprobeBesidePath() const {
+    return binaryBesideDlp(QStringLiteral("ffprobe"));
+}
+
+void YoutubeFetcher::ensureFfmpeg() {
+    if (m_ffmpegProcess || m_ffmpegReply)
+        return;
+    // A KJ who flipped the feature back off while yt-dlp was being probed must not
+    // have a ~100 MB ffmpeg download land on their connection anyway.
+    if (!m_settings.youtubeRequestsEnabled())
+        return;
+
+    if (QFileInfo::exists(ffmpegBesidePath())) {
+        m_logger->info("{} ffmpeg found beside yt-dlp", m_loggingPrefix);
+        m_ffmpegAvailable = true;
+        setAvailable(true);
+        ensureJsRuntime();
+        resumePending();
+        return;
+    }
+
+    // A copy on PATH is fine too - yt-dlp prefers the copy beside itself but falls
+    // back to PATH. The probe is async so the UI thread never blocks.
+    m_ffmpegProcess = new QProcess(this);
+    connect(m_ffmpegProcess, &QProcess::finished, this, [this](const int exitCode, QProcess::ExitStatus) {
+        QProcess *probe = m_ffmpegProcess;
+        if (!probe)
+            return;  // errorOccurred already handled it
+        const QString out = QString::fromUtf8(probe->readAllStandardOutput()).trimmed();
+        const bool found = exitCode == 0 && !out.isEmpty();
+        m_ffmpegProcess = nullptr;
+        probe->deleteLater();
+        if (found) {
+            m_logger->info("{} ffmpeg found on PATH", m_loggingPrefix);
+            m_ffmpegAvailable = true;
+            setAvailable(true);
+            ensureJsRuntime();
+            resumePending();
+        } else {
+            startFfmpegBootstrap();
+        }
+    });
+    connect(m_ffmpegProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        // Not on PATH. Only finished() would have cleaned this up on a normal exit.
+        if (m_ffmpegProcess) {
+            m_ffmpegProcess->deleteLater();
+            m_ffmpegProcess = nullptr;
+        }
+        startFfmpegBootstrap();
+    });
+    m_ffmpegProcess->start(QStringLiteral("ffmpeg"), {QStringLiteral("-version")});
+}
+
+QUrl YoutubeFetcher::ffmpegUrl() const {
+#ifdef Q_OS_WIN
+    // BtbN static build: one self-contained ffmpeg.exe inside a zip, no extra DLLs.
+    return QUrl(QStringLiteral("https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"));
+#elif defined(Q_OS_MACOS)
+    // evermeet.cx latest release; the zip holds a single universal "ffmpeg" binary.
+    return QUrl(QStringLiteral("https://evermeet.cx/ffmpeg/getrelease/zip"));
+#else
+    // No distro-independent single-file source on Linux; the distro's ffmpeg package
+    // is the sane route and the settings dialog says so.
+    return QUrl();
+#endif
+}
+
+void YoutubeFetcher::startFfmpegBootstrap() {
+    if (m_ffmpegReply)
+        return;
+    if (!m_settings.youtubeRequestsEnabled())
+        return;
+
+    const QUrl url = ffmpegUrl();
+    if (!url.isValid()) {
+        m_logger->warn("{} ffmpeg is missing and there is no auto-download for this platform", m_loggingPrefix);
+        m_logger->info("{} install ffmpeg and put it next to yt-dlp or on the PATH", m_loggingPrefix);
+        m_ffmpegAvailable = false;
+        setAvailable(false);
+        emit ffmpegBootstrapFinished(false);
+        return;
+    }
+    if (!QFileInfo::exists(QFileInfo(dlpPath()).absolutePath())) {
+        m_logger->error("{} yt-dlp directory is missing, cannot place ffmpeg beside it", m_loggingPrefix);
+        m_ffmpegAvailable = false;
+        setAvailable(false);
+        emit ffmpegBootstrapFinished(false);
+        return;
+    }
+
+    if (!bootstrapAllowed(m_lastFfmpegBootstrap, QStringLiteral("ffmpeg"))) {
+        m_ffmpegAvailable = false;
+        setAvailable(false);
+        emit ffmpegBootstrapFinished(false);
+        return;
+    }
+
+    m_logger->info("{} ffmpeg is missing, downloading {}", m_loggingPrefix, url.toString().toStdString());
+    // ~100 MB archive; give a slow venue connection room to finish it.
+    m_ffmpegReply = startDownload(url, QStringLiteral("ffmpeg"), 600000);
+    connect(m_ffmpegReply, &QNetworkReply::finished, this, &YoutubeFetcher::onFfmpegDownloadFinished);
+    emit ffmpegBootstrapStarted();
+}
+
+void YoutubeFetcher::onFfmpegDownloadFinished() {
+    QNetworkReply *reply = m_ffmpegReply;
+    m_ffmpegReply = nullptr;
+
+    if (reply->error() != QNetworkReply::NoError) {
+        m_logger->error("{} ffmpeg download failed: {}", m_loggingPrefix, reply->errorString().toStdString());
+        reply->deleteLater();
+        m_ffmpegAvailable = false;
+        setAvailable(false);
+        emit ffmpegBootstrapFinished(false);
+        return;
+    }
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    const QString target = ffmpegBesidePath();
+    if (!extractFfmpeg(data, target)) {
+        m_logger->error("{} Could not extract ffmpeg from the downloaded archive", m_loggingPrefix);
+        m_ffmpegAvailable = false;
+        setAvailable(false);
+        emit ffmpegBootstrapFinished(false);
+        return;
+    }
+
+    m_logger->info("{} Downloaded ffmpeg to {}", m_loggingPrefix, target.toStdString());
+    m_ffmpegAvailable = true;
+    setAvailable(true);
+    emit ffmpegBootstrapFinished(true);
+    ensureJsRuntime();
+    resumePending();
+}
+
+void YoutubeFetcher::setJsRuntimeAvailable(const bool available) {
+    if (m_jsRuntimeAvailable == available)
+        return;
+    m_jsRuntimeAvailable = available;
+    m_logger->info("{} JS runtime availability changed to: {}", m_loggingPrefix, available);
+    emit jsRuntimeAvailabilityChanged(available);
+}
+
+QString YoutubeFetcher::jsRuntimeBesidePath() const {
+    return binaryBesideDlp(QStringLiteral("deno"));
+}
+
+QUrl YoutubeFetcher::jsRuntimeUrl() const {
+    // Deno publishes one zip per target, each holding a single static binary - so this
+    // one works on Linux too, where there is no equivalent single-file ffmpeg to grab.
+    const bool arm = QSysInfo::currentCpuArchitecture().startsWith(QLatin1String("arm"));
+#ifdef Q_OS_WIN
+    const QString target = arm ? QStringLiteral("aarch64-pc-windows-msvc")
+                               : QStringLiteral("x86_64-pc-windows-msvc");
+#elif defined(Q_OS_MACOS)
+    const QString target = arm ? QStringLiteral("aarch64-apple-darwin")
+                               : QStringLiteral("x86_64-apple-darwin");
+#else
+    const QString target = arm ? QStringLiteral("aarch64-unknown-linux-gnu")
+                               : QStringLiteral("x86_64-unknown-linux-gnu");
+#endif
+    return QUrl(QStringLiteral("https://github.com/denoland/deno/releases/latest/download/deno-%1.zip")
+                        .arg(target));
+}
+
+void YoutubeFetcher::ensureJsRuntime() {
+    if (m_jsRuntimeProcess || m_jsRuntimeReply)
+        return;
+    if (!m_settings.youtubeRequestsEnabled())
+        return;
+
+    if (QFileInfo::exists(jsRuntimeBesidePath())) {
+        m_logger->info("{} JS runtime found beside yt-dlp", m_loggingPrefix);
+        setJsRuntimeAvailable(true);
+        return;
+    }
+
+    // A system-wide deno is just as good, and yt-dlp finds it by name on PATH.
+    m_jsRuntimeProcess = new QProcess(this);
+    connect(m_jsRuntimeProcess, &QProcess::finished, this, [this](const int exitCode, QProcess::ExitStatus) {
+        QProcess *probe = m_jsRuntimeProcess;
+        if (!probe)
+            return;  // errorOccurred already handled it
+        const QString out = QString::fromUtf8(probe->readAllStandardOutput()).trimmed();
+        const bool found = exitCode == 0 && !out.isEmpty();
+        m_jsRuntimeProcess = nullptr;
+        probe->deleteLater();
+        if (found) {
+            m_logger->info("{} JS runtime found on PATH: {}", m_loggingPrefix, out.toStdString());
+            setJsRuntimeAvailable(true);
+        } else {
+            startJsRuntimeBootstrap();
+        }
+    });
+    connect(m_jsRuntimeProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        // Not on PATH. Only finished() would have cleaned this up on a normal exit.
+        if (m_jsRuntimeProcess) {
+            m_jsRuntimeProcess->deleteLater();
+            m_jsRuntimeProcess = nullptr;
+        }
+        startJsRuntimeBootstrap();
+    });
+    m_jsRuntimeProcess->start(QStringLiteral("deno"), {QStringLiteral("--version")});
+}
+
+void YoutubeFetcher::startJsRuntimeBootstrap() {
+    if (m_jsRuntimeReply)
+        return;
+    if (!m_settings.youtubeRequestsEnabled())
+        return;
+    if (!QFileInfo::exists(QFileInfo(dlpPath()).absolutePath())) {
+        m_logger->error("{} yt-dlp directory is missing, cannot place the JS runtime beside it",
+                        m_loggingPrefix);
+        emit jsRuntimeBootstrapFinished(false);
+        return;
+    }
+    if (!bootstrapAllowed(m_lastJsRuntimeBootstrap, QStringLiteral("Deno"))) {
+        emit jsRuntimeBootstrapFinished(false);
+        return;
+    }
+
+    const QUrl url = jsRuntimeUrl();
+    m_logger->info("{} JS runtime is missing, downloading {}", m_loggingPrefix, url.toString().toStdString());
+    m_jsRuntimeReply = startDownload(url, QStringLiteral("Deno"), 600000);
+    connect(m_jsRuntimeReply, &QNetworkReply::finished, this, &YoutubeFetcher::onJsRuntimeDownloadFinished);
+    emit jsRuntimeBootstrapStarted();
+}
+
+void YoutubeFetcher::onJsRuntimeDownloadFinished() {
+    QNetworkReply *reply = m_jsRuntimeReply;
+    m_jsRuntimeReply = nullptr;
+
+    // Nothing here gates isAvailable(). Without a JS runtime yt-dlp still fetches, it
+    // just loses the formats that sit behind YouTube's player challenge - a degraded
+    // show beats a feature that refuses to run at all.
+    if (reply->error() != QNetworkReply::NoError) {
+        m_logger->warn("{} JS runtime download failed: {}", m_loggingPrefix, reply->errorString().toStdString());
+        reply->deleteLater();
+        emit jsRuntimeBootstrapFinished(false);
+        return;
+    }
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    const QString target = jsRuntimeBesidePath();
+    if (!extractZipBinary(data, QFileInfo(target).fileName(), target)) {
+        m_logger->warn("{} Could not extract the JS runtime; some formats may be unavailable",
+                       m_loggingPrefix);
+        emit jsRuntimeBootstrapFinished(false);
+        return;
+    }
+
+    m_logger->info("{} Downloaded the JS runtime to {}", m_loggingPrefix, target.toStdString());
+    setJsRuntimeAvailable(true);
+    emit jsRuntimeBootstrapFinished(true);
+}
+
+bool YoutubeFetcher::extractZipBinary(const QByteArray &zipData, const QString &memberName,
+                                      const QString &targetPath) {
+    mz_zip_archive archive;
+    memset(&archive, 0, sizeof(archive));
+    if (!mz_zip_reader_init_mem(&archive, zipData.constData(), zipData.size(), 0)) {
+        m_logger->error("{} downloaded archive could not be opened", m_loggingPrefix);
+        return false;
+    }
+
+    // Every build we pull from buries its binaries in a directory inside the zip, so
+    // match on the file name and ignore whatever path is wrapped around it.
+    size_t size = 0;
+    void *extracted = nullptr;
+    const unsigned count = mz_zip_reader_get_num_files(&archive);
+    for (unsigned i = 0; i < count; ++i) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&archive, i, &stat))
+            continue;
+        if (QFileInfo(QString::fromUtf8(stat.m_filename)).fileName() != memberName)
+            continue;
+        extracted = mz_zip_reader_extract_to_heap(&archive, i, &size, 0);
+        break;
+    }
+    mz_zip_reader_end(&archive);
+
+    if (!extracted) {
+        m_logger->warn("{} the archive held no {}", m_loggingPrefix, memberName.toStdString());
+        return false;
+    }
+
+    // A zip full of READMEs, or an HTML error page served with a 200, must not count.
+    const bool plausible = static_cast<qint64>(size) >= kMinExtractedSize;
+    if (!plausible)
+        m_logger->error("{} extracted {} looks wrong, only {} bytes",
+                        m_loggingPrefix, memberName.toStdString(), size);
+
+    bool ok = false;
+    if (plausible) {
+        // QSaveFile rather than miniz's own stdio writer: that one goes through fopen
+        // with the local 8-bit codec, so an install path with non-ASCII characters in it
+        // would fail to open on Windows.
+        QSaveFile file(targetPath);
+        ok = file.open(QIODevice::WriteOnly) &&
+             file.write(static_cast<const char *>(extracted), static_cast<qint64>(size)) ==
+                     static_cast<qint64>(size) &&
+             file.commit();
+        if (!ok)
+            m_logger->error("{} Could not write {} to {}: {}", m_loggingPrefix, memberName.toStdString(),
+                            targetPath.toStdString(), file.errorString().toStdString());
+    }
+    mz_free(extracted);
+
+    if (ok)
+        setExecutable(targetPath);
+    return ok;
+}
+
+bool YoutubeFetcher::extractFfmpeg(const QByteArray &zipData, const QString &targetPath) {
+    const bool ok = extractZipBinary(zipData, QFileInfo(targetPath).fileName(), targetPath);
+    // yt-dlp shells out to ffprobe for the fixup steps that run after a DASH merge, and
+    // the Windows build ships one in the same archive - so take it while we have it
+    // rather than leaving the KJ to notice the warning and go find it. The macOS archive
+    // holds ffmpeg only; yt-dlp degrades with a warning there rather than failing.
+    if (ok) {
+        const QString probe = ffprobeBesidePath();
+        if (!QFileInfo::exists(probe) &&
+            !extractZipBinary(zipData, QFileInfo(probe).fileName(), probe))
+            m_logger->warn("{} no ffprobe alongside it, some yt-dlp fixups will be skipped", m_loggingPrefix);
+    }
+    return ok;
+}
+
+QProcessEnvironment YoutubeFetcher::childEnvironment() const {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString dir = QDir::toNativeSeparators(QFileInfo(dlpPath()).absolutePath());
+    if (dir.isEmpty())
+        return env;
+    // yt-dlp looks its JS runtime up by name on PATH, and only Windows would have
+    // searched the directory it was launched from. Putting our own directory first also
+    // stops a stale system deno from shadowing the copy we downloaded. Key lookup is
+    // case-insensitive on Windows, so this updates "Path" rather than adding a second.
+    env.insert(QStringLiteral("PATH"), dir + QDir::listSeparator() + env.value(QStringLiteral("PATH")));
+    return env;
+}
+
 QStringList YoutubeFetcher::fetchArgs(const QString &videoId) const {
     const int maxHeight = m_settings.youtubeMaxHeight();
     // Prefer streams that already sit in an mp4-compatible container so the remux is a
@@ -217,7 +741,7 @@ QStringList YoutubeFetcher::fetchArgs(const QString &videoId) const {
             "bv*[ext=mp4][height<=%1]+ba[ext=m4a]/b[ext=mp4][height<=%1]/bv*[height<=%1]+ba/b[height<=%1]/b")
             .arg(maxHeight);
 
-    return {
+    QStringList args{
             QStringLiteral("--newline"),
             QStringLiteral("--no-color"),
             QStringLiteral("--no-playlist"),
@@ -230,10 +754,20 @@ QStringList YoutubeFetcher::fetchArgs(const QString &videoId) const {
             QStringLiteral("--remux-video"),
             QStringLiteral("mp4"),
             QStringLiteral("-o"),
-            partPathFor(videoId),
-            QStringLiteral("--"),
-            QStringLiteral("https://www.youtube.com/watch?v=") + videoId
+            partPathFor(videoId)
     };
+
+    // Only Windows searches the calling binary's own directory when yt-dlp spawns
+    // "ffmpeg"; execvp on Linux and macOS looks at PATH and nothing else. Point yt-dlp
+    // at the copy we placed beside it so the merge works the same way everywhere - and
+    // so a stale ffmpeg earlier on PATH cannot win over the one we downloaded.
+    const QString besideFfmpeg = ffmpegBesidePath();
+    if (QFileInfo::exists(besideFfmpeg))
+        args << QStringLiteral("--ffmpeg-location") << QFileInfo(besideFfmpeg).absolutePath();
+
+    args << QStringLiteral("--")
+         << QStringLiteral("https://www.youtube.com/watch?v=") + videoId;
+    return args;
 }
 
 void YoutubeFetcher::enqueue(const QString &videoId, const int songId, const QString &requestedBy) {
@@ -308,6 +842,7 @@ void YoutubeFetcher::startJob(const QString &videoId, const int songId) {
     dbIncrementAttempts(videoId);
     dbSetState(videoId, State::Fetching, 0, {});
     m_logger->info("{} Fetching video {} for songid {}", m_loggingPrefix, videoId, songId);
+    job->process->setProcessEnvironment(childEnvironment());
     job->process->start(dlpPath(), fetchArgs(videoId));
 }
 
