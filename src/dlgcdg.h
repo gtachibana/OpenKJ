@@ -175,6 +175,7 @@ private:
     std::unique_ptr<PitchCueWidget> m_pitchCue;
     std::unique_ptr<CheerWidget> m_cheers;
     Settings m_settings;
+    void setFullScreen(bool fullScreen);
 public:
     explicit DlgCdg(MediaBackend &KaraokeBackend, MediaBackend &BreakBackend, QWidget *parent = nullptr,
                     Qt::WindowFlags f = QFlags<Qt::WindowType>());
