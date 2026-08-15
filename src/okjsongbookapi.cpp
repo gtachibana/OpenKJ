@@ -10,9 +10,18 @@
 #include <QSqlQuery>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPointer>
+#include <QTimer>
 #include "idledetect.h"
 
 extern IdleDetect *filter;
+
+namespace {
+    // Ceiling on the request-server calls that block the UI while they wait. Generous
+    // for an API that normally answers in well under a second, but finite - the point
+    // is only that a server which never answers cannot wedge the app.
+    constexpr int kRequestTimeoutMs = 15000;
+}
 
 OKJSongbookAPI::OKJSongbookAPI(QObject *parent) : QObject(parent)
 {
@@ -130,10 +139,13 @@ void OKJSongbookAPI::refreshVenues(bool blocking)
     jsonDocument.setObject(mainObject);
     QNetworkRequest request(QUrl(m_settings.requestServerUrl()));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    QNetworkReply *reply = manager->post(request, jsonDocument.toJson());
+    // Bounded, because the blocking form spins the UI until the reply finishes and a
+    // server that accepts the connection and then says nothing would spin it for good.
+    request.setTransferTimeout(kRequestTimeoutMs);
+    QPointer<QNetworkReply> reply = manager->post(request, jsonDocument.toJson());
     if (blocking)
     {
-        while (!reply->isFinished())
+        while (reply && !reply->isFinished())
             QApplication::processEvents();
     }
 }
@@ -186,14 +198,21 @@ void OKJSongbookAPI::updateSongDb()
             QApplication::processEvents();
             QJsonArray songsArray;
             int count = 0;
-            while ((query.next()) && (count < songsPerDoc))
+            // The count is tested first. The other way round, query.next() still ran on
+            // the iteration that ended the loop - advancing the cursor over a row that
+            // was then never added to this document and never re-read, because the next
+            // pass starts with a fresh next(). That silently dropped one song at every
+            // 1000-row boundary, so a 100k library uploaded about 99 songs short.
+            while ((count < songsPerDoc) && (query.next()))
             {
                 if (cancelUpdate)
                     return;
                 QJsonObject songObject;
                 songObject.insert("artist", query.value(0).toString());
                 songObject.insert("title", query.value(1).toString());
-                songsArray.insert(0, songObject);
+                // append, not insert(0, ...): inserting at the front is O(n^2) over a
+                // 1000-song document and reversed each one against the query's ORDER BY.
+                songsArray.append(songObject);
                 QApplication::processEvents();
                 count++;
             }
@@ -220,26 +239,46 @@ void OKJSongbookAPI::updateSongDb()
         if (cancelUpdate)
             return;
         request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-        QNetworkAccessManager *manager = new QNetworkAccessManager(this);
-        QNetworkReply *reply = manager->post(request, jsonDocument.toJson());
-        while (!reply->isFinished())
+        // The member manager, and the reply is disposed of afterwards. Both loops used
+        // to build a fresh QNetworkAccessManager per request, parented to this and never
+        // deleted, shadowing the member that exists for exactly this - so a 100k-song
+        // push left around a hundred managers and a hundred replies alive until the app
+        // exited, each with its own connection pool and thread.
+        QPointer<QNetworkReply> reply = manager->post(request, jsonDocument.toJson());
+        while (reply && !reply->isFinished())
             QApplication::processEvents();
-        m_logger->trace("{} Got reply: {}", m_loggingPrefix, reply->readAll().toStdString());
+        if (reply)
+        {
+            m_logger->trace("{} Got reply: {}", m_loggingPrefix, reply->readAll().toStdString());
+            reply->deleteLater();
+        }
         for (int i=0; i < jsonDocs.size(); i++)
         {
             if (cancelUpdate)
                 return;
             QApplication::processEvents();
-            QNetworkRequest request(url);
-            request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-            QNetworkAccessManager *manager = new QNetworkAccessManager(this);
-            QNetworkReply *reply = manager->post(request, jsonDocs.at(i).toJson());
-            while (!reply->isFinished()){
+            QNetworkRequest docRequest(url);
+            docRequest.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+            QPointer<QNetworkReply> docReply = manager->post(docRequest, jsonDocs.at(i).toJson());
+            bool cancelled{false};
+            while (docReply && !docReply->isFinished())
+            {
                 if (cancelUpdate)
-                    return;
+                {
+                    cancelled = true;
+                    break;
+                }
                 QApplication::processEvents();
             }
-            if (cancelUpdate)
+            // Disposed of on the cancel path too - every early return out of this loop
+            // used to strand the in-flight request as well as its manager.
+            if (docReply)
+            {
+                if (cancelled)
+                    docReply->abort();
+                docReply->deleteLater();
+            }
+            if (cancelled || cancelUpdate)
                 return;
             emit remoteSongDbUpdateProgress(i + 1);
         }
@@ -258,25 +297,43 @@ bool OKJSongbookAPI::test()
     QJsonDocument jsonDocument;
     jsonDocument.setObject(mainObject);
     QNetworkAccessManager m_NetworkMngr;
+    // onTestSslErrors exists for this manager but was never connected to it, so the
+    // "ignore certificate errors" setting had no effect on the Test button - the one
+    // place a KJ goes to find out why their request server will not talk to them.
+    connect(&m_NetworkMngr, &QNetworkAccessManager::sslErrors, this, &OKJSongbookAPI::onTestSslErrors);
 
     QNetworkRequest request(QUrl(m_settings.requestServerUrl()));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    // Both a transfer timeout and a fallback that quits the loop. Without either, a
+    // server that accepts the connection and never answers left the Settings dialog
+    // blocked in this nested event loop permanently, with no way out but killing OpenKJ.
+    request.setTransferTimeout(kRequestTimeoutMs);
     QNetworkReply *reply = m_NetworkMngr.post(request, jsonDocument.toJson());
     QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QTimer::singleShot(kRequestTimeoutMs + 2000, &loop, &QEventLoop::quit);
     loop.exec();
+    if (!reply->isFinished())
+    {
+        m_logger->error("{} Request server did not respond within {}ms", m_loggingPrefix, kRequestTimeoutMs);
+        reply->abort();
+        reply->deleteLater();
+        emit testFailed(tr("The request server did not respond."));
+        return false;
+    }
     if (reply->error() != QNetworkReply::NoError)
     {
         m_logger->error("{} Network error: {}", m_loggingPrefix, reply->errorString());
-        emit testFailed(reply->errorString());
+        const QString errorString = reply->errorString();
+        reply->deleteLater();
+        emit testFailed(errorString);
         return false;
     }
     QByteArray data = reply->readAll();
-    delete reply;
+    reply->deleteLater();
     QJsonDocument json = QJsonDocument::fromJson(data);
     m_logger->trace("{} Got server response: {}", m_loggingPrefix, json.toJson().toStdString());
     QString command = json.object().value("command").toString();
-    bool error = json.object().value("error").toBool();
     if (json.object().value("errorString").toString() != "")
     {
         m_logger->warn("{} Got error reply: {}", m_loggingPrefix, json.object().value("errorString").toString());
@@ -387,7 +444,7 @@ void OKJSongbookAPI::onNetworkReply(QNetworkReply *reply)
         }
         if (serial == newSerial)
         {
-            lastSync = QTime::currentTime();
+            markSynchronized();
             emit synchronized(lastSync);
         }
         else
@@ -395,7 +452,7 @@ void OKJSongbookAPI::onNetworkReply(QNetworkReply *reply)
             serial = newSerial;
             refreshRequests();
             refreshVenues();
-            lastSync = QTime::currentTime();
+            markSynchronized();
             emit synchronized(lastSync);
         }
     }
@@ -419,7 +476,7 @@ void OKJSongbookAPI::onNetworkReply(QNetworkReply *reply)
             emit venuesChanged(venues);
             getEntitledSystemCount();
         }
-        lastSync = QTime::currentTime();
+        markSynchronized();
         emit synchronized(lastSync);
     }
     if (command == "clearRequests")
@@ -448,7 +505,7 @@ void OKJSongbookAPI::onNetworkReply(QNetworkReply *reply)
             requests = l_requests;
             emit requestsChanged(requests);
         }
-        lastSync = QTime::currentTime();
+        markSynchronized();
         emit synchronized(lastSync);
     }
     if (command == "setAccepting")
@@ -463,16 +520,36 @@ void OKJSongbookAPI::onNetworkReply(QNetworkReply *reply)
     }
 }
 
+void OKJSongbookAPI::markSynchronized()
+{
+    // lastSync is what the UI shows. The elapsed timer beside it is what the staleness
+    // checks measure against: QTime::secsTo() runs backwards to about -86400 the moment
+    // the clock passes midnight, and shows routinely run past midnight - so from then
+    // until the app was restarted, neither the delay warning nor the auto-reconnect
+    // could fire again no matter how long the request server had been silent.
+    lastSync = QTime::currentTime();
+    m_sinceLastSync.restart();
+}
+
+int OKJSongbookAPI::secsSinceLastSync() const
+{
+    // Nothing synced yet reads as zero, which is what the QTime version did with a
+    // null lastSync.
+    if (!m_sinceLastSync.isValid())
+        return 0;
+    return static_cast<int>(m_sinceLastSync.elapsed() / 1000);
+}
+
 void OKJSongbookAPI::timerTimeout()
 {
     if (m_settings.requestServerEnabled() && !programIsIdle)
     {
-        if ((lastSync.secsTo(QTime::currentTime()) > 300) && (!delayErrorEmitted))
+        if ((secsSinceLastSync() > 300) && (!delayErrorEmitted))
         {
-            emit delayError(lastSync.secsTo(QTime::currentTime()));
+            emit delayError(secsSinceLastSync());
             delayErrorEmitted = true;
         }
-        else if ((lastSync.secsTo(QTime::currentTime()) > 200) && (!connectionReset))
+        else if ((secsSinceLastSync() > 200) && (!connectionReset))
         {
             refreshRequests();
             refreshVenues();
@@ -505,7 +582,7 @@ void OKJSongbookAPI::idleStateChanged(bool isIdle)
         // reset last update time to current to avoid showing
         // warning dialog to user due to updates being suppressed
         // during idle period
-        lastSync = QTime::currentTime();
+        markSynchronized();
         timerTimeout();
     }
     programIsIdle = isIdle;

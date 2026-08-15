@@ -34,8 +34,8 @@ private:
     std::unique_ptr<Ui::DlgBookCreator> ui;
     Settings m_settings;
     void writePdf(const QString& filename, int nCols = 2);
-    static QStringList getArtists();
-    static QStringList getTitles(const QString& artist);
+    // "-artist" and "+title" lines, in book order - see the definition.
+    static QStringList getEntries();
     void setupConnections() const;
     void loadSettings();
 
