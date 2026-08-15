@@ -165,9 +165,12 @@ MediaBackend::~MediaBackend()
     gst_object_unref(m_videoBin);
     gst_object_unref(m_videoBin);
     delete m_cdgSrc;
+    // Entry 0 is the synthetic "0 - Default" device, whose gstDevice is null - unreffing
+    // that fired a GLib critical on every shutdown where a non-default device was
+    // selected. The selected device is unrefed here too; skipping it leaked one object.
     for (auto &device : m_audioOutputDevices)
     {
-        if (device.index != m_outputDevice.index)
+        if (device.gstDevice)
             g_object_unref(device.gstDevice);
     }
 
@@ -721,29 +724,37 @@ void MediaBackend::gstBusFunc(GstMessage *message)
 }
 
 void gstDebugFunction(GstDebugCategory * category, GstDebugLevel level, [[maybe_unused]] const gchar * file,
-                      [[maybe_unused]] const gchar * function, [[maybe_unused]] gint line, [[maybe_unused]] GObject * object, GstDebugMessage * message, gpointer user_data) {
-    auto *backend = (MediaBackend*)user_data;
+                      [[maybe_unused]] const gchar * function, [[maybe_unused]] gint line, [[maybe_unused]] GObject * object, GstDebugMessage * message, [[maybe_unused]] gpointer user_data) {
+    // The logger comes from spdlog rather than from user_data. This callback used to be
+    // handed the MediaBackend that registered it and dereference that backend's logger,
+    // with nothing removing the callback when the backend died and no destroy-notify to
+    // do it - and the first of the three backends constructed (Kar, Bm, Sfx) is the last
+    // one destroyed, so any GStreamer logging during shutdown teardown read freed
+    // memory. The logger is process-wide, so there is nothing here worth an owner.
+    static const std::shared_ptr<spdlog::logger> logger = spdlog::get("logger");
+    if (!logger)
+        return;
     std::string loggingPrefix{"[GStreamerGlobalLog]"};
     switch (level) {
         case GST_LEVEL_NONE:
             break;
         case GST_LEVEL_ERROR:
-            backend->m_logger->error("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
+            logger->error("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
             break;
         case GST_LEVEL_WARNING:
-            backend->m_logger->warn("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
+            logger->warn("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
             break;
         case GST_LEVEL_FIXME:
         case GST_LEVEL_INFO:
-            backend->m_logger->info("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
+            logger->info("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
             break;
         case GST_LEVEL_DEBUG:
-            backend->m_logger->debug("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
+            logger->debug("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
             break;
         case GST_LEVEL_LOG:
             break;
         case GST_LEVEL_TRACE:
-            backend->m_logger->trace("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
+            logger->trace("{} [gstreamer] [{}] - {}", loggingPrefix, category->name, gst_debug_message_get(message));
             break;
         case GST_LEVEL_MEMDUMP:
         case GST_LEVEL_COUNT:
@@ -759,7 +770,9 @@ void MediaBackend::buildPipeline()
         m_logger->debug("{} Gstreamer not initialized yet, initializing", m_loggingPrefix);
         gst_init(nullptr,nullptr);
         gst_debug_remove_log_function(nullptr);
-        gst_debug_add_log_function(gstDebugFunction, this, nullptr);
+        // No user data - see gstDebugFunction(). Nothing here owns the callback, and
+        // nothing needs to.
+        gst_debug_add_log_function(gstDebugFunction, nullptr, nullptr);
     }
 
 #ifdef Q_OS_WIN
@@ -1137,9 +1150,17 @@ void MediaBackend::setTempo(const int &percent)
         m_timerSlow.start();
     }
 
-    // Change rate by doing a flushing seek to ~current position
-    gint64 curpos;
-    gst_element_query_position (m_pipeline, GST_FORMAT_TIME, &curpos);
+    // Change rate by doing a flushing seek to ~current position.
+    // GStreamer leaves the out-param untouched when the query fails, so seeking on an
+    // unchecked curpos was a flushing seek to whatever was on the stack. This is the
+    // CD+G path - the branch above returns for everything else - so it runs against
+    // appsrc early in playback, which is exactly where a position query does fail.
+    gint64 curpos{0};
+    if (!gst_element_query_position(m_pipeline, GST_FORMAT_TIME, &curpos))
+    {
+        m_logger->warn("{} Position query failed, not seeking for tempo change", m_loggingPrefix);
+        return;
+    }
     gst_element_send_event(m_pipeline, gst_event_new_seek(m_playbackRate, GST_FORMAT_TIME, (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE), GST_SEEK_TYPE_SET, curpos, GST_SEEK_TYPE_NONE, 0));
 }
 

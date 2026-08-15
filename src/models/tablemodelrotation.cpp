@@ -104,6 +104,11 @@ QVariant TableModelRotation::data(const QModelIndex &index, int role) const {
         case Qt::ForegroundRole:
             if (m_singers.at(index.row()).id == m_currentSingerId && index.column() > 0)
                 return QColor("black");
+            // Without this, every row that isn't the current singer falls through and
+            // hands its display value back as a foreground brush. QVariant refuses to
+            // convert a QString or an int to a QBrush so the table paints correctly
+            // today, but nothing about that is intentional.
+            return {};
         case Qt::DisplayRole:
             return getDisplayData(index);
         default:
@@ -525,6 +530,10 @@ void TableModelRotation::singerSetRegular(const int singerId, const bool isRegul
     auto it = std::find_if(m_singers.begin(), m_singers.end(), [&singerId](okj::RotationSinger &singer) {
         return (singerId == singer.id);
     });
+    // Same check singerSetName() and singerSetPaused() make. The regular-singers dialog
+    // reaches this with getSingerByName().id, which is -1 for anyone not in the rotation.
+    if (it == m_singers.end())
+        return;
     it->regular = isRegular;
     emit dataChanged(this->index(it->position, COL_REGULAR), this->index(it->position, COL_REGULAR),
                      QVector<int>{Qt::DisplayRole});
@@ -859,8 +868,12 @@ const okj::RotationSinger &TableModelRotation::getSinger(int singerId) const {
 }
 
 const okj::RotationSinger &TableModelRotation::getSingerByName(const QString &name) const {
+    // Case-insensitive, to agree with singerExists() just above and with the column
+    // itself - rotationSingers.name is COLLATE NOCASE UNIQUE. While these disagreed,
+    // every singerExists() -> getSingerByName() pair handed back InvalidSinger for a
+    // name that differed only in case, and the callers took id -1 as a real answer.
     auto it = std::find_if(m_singers.begin(), m_singers.end(), [&name](const okj::RotationSinger &singer) {
-        return singer.name == name;
+        return QString::compare(singer.name, name, Qt::CaseInsensitive) == 0;
     });
     if (it == m_singers.end())
         return InvalidSinger;
@@ -913,10 +926,14 @@ int TableModelRotation::positionWaitTime(int position) const {
                 totalWaitDuration += nextDuration;
             }
         }
-        for (int i = curSinger.position; i < m_singers.size(); i++) {
+        for (int i = curSinger.position; i < static_cast<int>(m_singers.size()); i++) {
             const auto &loopSinger = getSingerAtPosition(i);
             if (i == curSinger.position)
-                totalWaitDuration += 240;
+                // The remaining time on the song actually playing, as the forward
+                // branch above uses. The flat 240 put every singer who had already
+                // been round this rotation out by (240 - actual), and that number is
+                // what /local/queue reports to the phones as wait_seconds.
+                totalWaitDuration += m_remainSecs;
             else if (loopSinger.id != singer.id) {
                 int nextDuration = loopSinger.nextSongDurationSecs();
                 totalWaitDuration += nextDuration;

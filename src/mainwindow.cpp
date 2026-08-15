@@ -2402,7 +2402,7 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
                 if (m_settings.rotationAltSortOrder())
                     curPos = m_curSingerOriginalPosition;
                 if (curSingerId == -1)
-                    curPos = static_cast<int>(m_rotModel.singerCount() - 1);
+                    curPos = static_cast<int>(m_rotModel.singerCount()) - 1;
                 if (!findNextPlayableSinger(curPos, true, nextSinger, nextSongPath))
                     m_logger->info("{} KaraokeAA - No more songs to play, giving up", m_loggingPrefix);
                 else {
@@ -2421,7 +2421,7 @@ void MainWindow::karaokeMediaBackend_stateChanged(const MediaBackend::State &sta
             }
         }
         if (m_settings.rotationAltSortOrder()) {
-            m_rotModel.singerMove(0, static_cast<int>(m_rotModel.singerCount() - 1));
+            m_rotModel.singerMove(0, static_cast<int>(m_rotModel.singerCount()) - 1);
             m_rotModel.setCurrentSinger(-1);
             m_rotDelegate.setCurrentSinger(-1);
             ui->tableViewRotation->clearSelection();
@@ -5077,10 +5077,10 @@ bool MainWindow::findNextPlayableSinger(const int startPosition, const bool defe
     const int otherSingers = std::max(static_cast<int>(m_rotModel.singerCount()) - 1, 0);
     int loops = 0;
     while ((nextSongPath == "") && (!empty)) {
-        if (loops > m_rotModel.singerCount()) {
+        if (loops > static_cast<int>(m_rotModel.singerCount())) {
             empty = true;
         } else {
-            if (++curPos >= m_rotModel.singerCount())
+            if (++curPos >= static_cast<int>(m_rotModel.singerCount()))
                 curPos = 0;
             nextSinger = m_rotModel.getSingerAtPosition(curPos);
             const bool turnIsTheirs =

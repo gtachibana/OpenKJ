@@ -113,34 +113,36 @@ void DlgBookCreator::saveFontSettings() {
     m_settings.setBookCreatorFooterFont(fFont);
 }
 
-QStringList DlgBookCreator::getArtists() {
+// One pass over the library rather than one query per artist. Ordered the same way the
+// per-artist queries were, so the book comes out identically; the artist rows are the
+// changes of artist in the result rather than a separate query each. On a 100k-song
+// library the old shape was around ten thousand round trips to sqlite.
+QStringList DlgBookCreator::getEntries() {
     QSqlQuery query;
-    QStringList artists;
-    QString sql = "SELECT DISTINCT artist FROM dbsongs WHERE discid != '!!DROPPED!!' AND discid != '!!YOUTUBE!!' AND bad = 0 ORDER BY artist";
+    QStringList entries;
+    QString sql = "SELECT DISTINCT artist, title FROM dbsongs "
+                  "WHERE discid != '!!DROPPED!!' AND discid != '!!YOUTUBE!!' AND bad = 0 "
+                  "ORDER BY artist, title";
     query.exec(sql);
+    QString lastArtist;
+    bool haveArtist{false};
     while (query.next()) {
-        artists.append(query.value("artist").toString());
+        const QString artist = query.value(0).toString();
+        if (!haveArtist || artist != lastArtist) {
+            entries.append("-" + artist);
+            lastArtist = artist;
+            haveArtist = true;
+        }
+        entries.append("+" + query.value(1).toString());
     }
-    return artists;
-}
-
-QStringList DlgBookCreator::getTitles(const QString &artist) {
-    QSqlQuery query;
-    QStringList titles;
-    QString sql = "SELECT DISTINCT title FROM dbsongs WHERE artist = :artist AND discid != '!!DROPPED!!' AND discid != '!!YOUTUBE!!' AND bad = 0 ORDER BY title";
-    query.prepare(sql);
-    query.bindValue(":artist", artist);
-    query.exec();
-    while (query.next()) {
-        titles.append(query.value("title").toString());
-    }
-    return titles;
+    return entries;
 }
 
 void DlgBookCreator::writePdf(const QString &filename, int nCols) {
     QProgressDialog progress(this);
     progress.setWindowModality(Qt::WindowModal);
-    progress.setCancelButton(nullptr);
+    // Cancellable. Generating a book from a large library takes minutes, and with the
+    // cancel button explicitly removed the only way out was killing the app.
     progress.setLabelText("Gathering artist data");
     progress.setValue(0);
     progress.setMaximum(0);
@@ -156,23 +158,11 @@ void DlgBookCreator::writePdf(const QString &filename, int nCols) {
             QMarginsF(ui->doubleSpinBoxLeft->value(), ui->doubleSpinBoxTop->value(), ui->doubleSpinBoxRight->value(),
                       ui->doubleSpinBoxBottom->value()), QPageLayout::Inch);
     QPainter painter(&pdf);
-    m_logger->info("{} Getting artists",m_loggingPrefix);
-    QStringList artists = getArtists();
-    m_logger->info("{} Got {} artists",m_loggingPrefix, artists.size());
-    QStringList entries;
-    m_logger->info("{} Getting titles for artists",m_loggingPrefix);
+    m_logger->info("{} Getting song data",m_loggingPrefix);
     progress.setLabelText("Parsing song data");
-    progress.setMaximum(artists.size());
-    for (int i = 0; i < artists.size(); i++) {
-        QApplication::processEvents();
-        entries.append("-" + artists.at(i));
-        QStringList titles = getTitles(artists.at(i));
-        for (int j = 0; j < titles.size(); j++) {
-            entries.append("+" + titles.at(j));
-        }
-        progress.setValue(i);
-    }
-    m_logger->info("{} Done getting titles",m_loggingPrefix);
+    QApplication::processEvents();
+    QStringList entries = getEntries();
+    m_logger->info("{} Got {} entries",m_loggingPrefix, entries.size());
     QPen pen;
     pen.setColor(QColor(0, 0, 0));
     pen.setWidth(4);
@@ -193,11 +183,21 @@ void DlgBookCreator::writePdf(const QString &filename, int nCols) {
     m_logger->info("{} Writing data to pdf",m_loggingPrefix);
     progress.setLabelText("Writing data to PDF");
     progress.setValue(0);
-    progress.setMaximum(entries.size());
-    int curEntry = 0;
+    const int totalEntries = static_cast<int>(entries.size());
+    progress.setMaximum(totalEntries);
+    bool cancelled{false};
     m_logger->info("{} Generating pages",m_loggingPrefix);
     while (!entries.isEmpty()) {
         QApplication::processEvents();
+        if (progress.wasCanceled()) {
+            cancelled = true;
+            break;
+        }
+        // Every column below can legitimately consume nothing - the "last line and it's
+        // an artist, push it to the next column" branch advances the draw position
+        // without taking the entry. If a page/font combination leaves every column doing
+        // that, the entry list never shrinks and the loop writes pages forever.
+        const int entriesAtPageStart = static_cast<int>(entries.size());
         pages++;
         m_logger->debug("{} Generating page {}",m_loggingPrefix, pages);
         int topOffset = 40;
@@ -332,26 +332,41 @@ void DlgBookCreator::writePdf(const QString &filename, int nCols) {
                 curDrawPos = curDrawPos + fontHeight;
             }
         }
+        if (static_cast<int>(entries.size()) == entriesAtPageStart) {
+            m_logger->error("{} Page {} consumed no entries - stopping rather than writing pages forever. "
+                            "The page size and font size are probably leaving no usable room in a column.",
+                            m_loggingPrefix, pages);
+            break;
+        }
         if (!entries.isEmpty()) {
             pdf.newPage();
             pdf.setPageMargins(QMarginsF(ui->doubleSpinBoxLeft->value(), ui->doubleSpinBoxTop->value(),
                                          ui->doubleSpinBoxRight->value(), ui->doubleSpinBoxBottom->value()),
                                QPageLayout::Inch);
         }
-        curEntry++;
-        progress.setValue(curEntry);
+        // Entries actually written, not pages. The maximum here is the entry count -
+        // 100k+ on a library this size - while this advanced once per page, so the bar
+        // never visibly left zero.
+        progress.setValue(totalEntries - static_cast<int>(entries.size()));
     }
     m_logger->info("{} Done writing data to pdf",m_loggingPrefix);
     m_logger->info("{} Finalizing pdf",m_loggingPrefix);
     progress.setLabelText("Finalizing PDF");
     progress.setMaximum(0);
     progress.setValue(0);
+    // Finalized either way: a cancelled run has already written pages, and leaving the
+    // painter open would abandon the file half written.
     painter.end();
     progress.close();
     QMessageBox msgBox(this);
-    msgBox.setText("Songbook PDF generation complete");
+    if (cancelled) {
+        msgBox.setText(tr("Songbook generation cancelled. The PDF holds the %1 pages written so far.").arg(pages));
+        m_logger->info("{} Songbook generation cancelled after {} pages",m_loggingPrefix, pages);
+    } else {
+        msgBox.setText("Songbook PDF generation complete");
+        m_logger->info("{} Songbook generation complete",m_loggingPrefix);
+    }
     msgBox.exec();
-    m_logger->info("{} Songbook generation complete",m_loggingPrefix);
 }
 
 

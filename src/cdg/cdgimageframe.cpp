@@ -169,7 +169,15 @@ void CdgImageFrame::cmdTileBlock(const cdg::CdgTileBlockData &tileBlockPacket, c
 
 void CdgImageFrame::cmdScroll(const cdg::CdgScrollCmdData &scrollCmdData, const cdg::ScrollType type)
 {
-    // Todo: add range checks for corrupted CDG packets to prevent crashes
+    // The offsets are range checked in CdgScrollCmdData's constructor, alongside the
+    // clamping the other packet structs do.
+    //
+    // Every copy that shifts the image within itself is a memmove, not a memcpy: source
+    // and destination overlap by all but 6 pixels across and all but 12 lines down, and
+    // memcpy on overlapping ranges is undefined - a vectorised forward copy smears the
+    // leading bytes over the rest of the region when the destination is the higher
+    // address. The copies to and from the scratch buffers are the only ones that cannot
+    // overlap, so they stay as memcpy.
 
     if (scrollCmdData.hSCmd == 2)
     {
@@ -177,13 +185,15 @@ void CdgImageFrame::cmdScroll(const cdg::CdgScrollCmdData &scrollCmdData, const 
         for (auto i=0; i < 216; i++)
         {
             auto bits = m_image.scanLine(i);
-            unsigned char* tmpPixels[6];
+            unsigned char tmpPixels[6];
             memcpy(tmpPixels, bits, 6);
-            memcpy(bits, bits + (6 * m_bytesPerPixel), 294 * m_bytesPerPixel);
+            memmove(bits, bits + (6 * m_bytesPerPixel), 294 * m_bytesPerPixel);
             if (type == cdg::ScrollCopy)
                 memcpy(bits + m_borderRBytesOffset, tmpPixels, 6);
             else
-                memset(bits + m_borderLRBytes, scrollCmdData.color, 6);
+                // The right-hand edge is the one the content just vacated, which is
+                // where the ScrollCopy branch above puts the wrapped pixels.
+                memset(bits + m_borderRBytesOffset, scrollCmdData.color, 6);
         }
     }
     if (scrollCmdData.hSCmd == 1)
@@ -192,34 +202,42 @@ void CdgImageFrame::cmdScroll(const cdg::CdgScrollCmdData &scrollCmdData, const 
         for (auto i=0; i < 216; i++)
         {
             auto bits = m_image.scanLine(i);
-            unsigned char* tmpPixels[6];
+            unsigned char tmpPixels[6];
             memcpy(tmpPixels, bits + (m_bytesPerPixel * 294), 6);
-            memcpy(bits + (6 * m_bytesPerPixel), bits , 294 * m_bytesPerPixel);
+            memmove(bits + (6 * m_bytesPerPixel), bits , 294 * m_bytesPerPixel);
             if (type == cdg::ScrollCopy)
                 memcpy(bits, tmpPixels, 6);
             else
                 memset(bits, scrollCmdData.color, 6);
         }
     }
-    if (scrollCmdData.vSCmd == 2)
+    // The scratch buffers below hold the 12 lines that wrap around. They were declared
+    // as arrays of pointers, which made them 8x larger than needed rather than smaller,
+    // so nothing overflowed - but tmpLines was a 28KB stack frame doing the job of 3.6KB.
+    // Sized as bytes now, with the stride they are filled from checked against them:
+    // QImage pads scanlines to 4 bytes, and 300 needs no padding today, but a frame that
+    // ever gained a wider stride would overrun a buffer that is no longer oversized.
+    constexpr int SCROLL_SCRATCH_BYTES = 3600;
+    const bool scratchFits = (m_image.bytesPerLine() * 12) <= SCROLL_SCRATCH_BYTES;
+    if (scrollCmdData.vSCmd == 2 && scratchFits)
     {
         // scroll up 12px
         auto bits = m_image.bits();
-        unsigned char* tmpLines[3600]; // m_image.bytesPerLine() * 12
+        unsigned char tmpLines[SCROLL_SCRATCH_BYTES]; // m_image.bytesPerLine() * 12
         memcpy(tmpLines, bits, m_image.bytesPerLine() * 12);
-        memcpy(bits, bits + m_image.bytesPerLine() * 12, 204 * m_image.bytesPerLine());
+        memmove(bits, bits + m_image.bytesPerLine() * 12, 204 * m_image.bytesPerLine());
         if (type == cdg::ScrollCopy)
             memcpy(bits + (204 * m_image.bytesPerLine()), tmpLines, m_image.bytesPerLine() * 12);
         else
             memset(bits + (204 * m_image.bytesPerLine()), scrollCmdData.color, m_image.bytesPerLine() * 12);
     }
-    if (scrollCmdData.vSCmd == 1)
+    if (scrollCmdData.vSCmd == 1 && scratchFits)
     {
         // scroll down 12px
         auto bits = m_image.bits();
-        unsigned char* tmpLines[3600];
+        unsigned char tmpLines[SCROLL_SCRATCH_BYTES];
         memcpy(tmpLines, bits + (m_image.bytesPerLine() * 204), m_image.bytesPerLine() * 12);
-        memcpy(bits + (m_image.bytesPerLine() * 12), bits, 204 * m_image.bytesPerLine());
+        memmove(bits + (m_image.bytesPerLine() * 12), bits, 204 * m_image.bytesPerLine());
         if (type == cdg::ScrollCopy)
             memcpy(bits, tmpLines, m_image.bytesPerLine() * 12);
         else

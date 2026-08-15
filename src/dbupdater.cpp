@@ -350,6 +350,13 @@ void DbUpdater::DbEnumerator::prepareQuery(bool limitToPaths)
             sql_path_filter.append(QString("path LIKE :pathfilter%1").arg(i));
         }
 
+        // No paths means no rows, and it has to be said in SQL that parses. Joining an
+        // empty filter list produced "... FROM dbsongs WHERE  ORDER BY path", which
+        // fails to prepare - and the failure is silent, so the enumerator reported an
+        // empty library rather than an error.
+        if (sql_path_filter.isEmpty())
+            sql_path_filter.append("0");
+
         m_dbSongs.prepare("SELECT songid, path, CASE discid WHEN '!!DROPPED!!' THEN 1 ELSE 0 END FROM dbsongs WHERE " + sql_path_filter.join(" OR ") + " ORDER BY path");
         for(int i = 0; i < m_parent.m_paths.size(); i++) {
             auto key = QString(":pathfilter%1").arg(i);

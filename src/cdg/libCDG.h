@@ -30,6 +30,7 @@
 #include <QColor>
 #include <vector>
 #include <array>
+#include <algorithm>
 
 
 namespace cdg {
@@ -177,9 +178,14 @@ struct CdgScrollCmdData
         hScroll = (data[1] & 0x3F);
         vScroll = (data[2] & 0x3F);
         hSCmd = (hScroll & 0x30) >> 4;
-        hSOffset = (hScroll & 0x07);
+        // use clamp to pull corrupted CDG data into range, as the structs above do.
+        // The masks alone let through more than the redbook allows - 0-7 across and
+        // 0-15 down against a legal 0-5 and 0-11 - and copyCroppedImagedata() adds
+        // these straight to its read position with no check of its own. A vertical
+        // offset of 13-15 walks it off the end of the 300x216 frame.
+        hSOffset = std::clamp(hScroll & 0x07, 0, 5);
         vSCmd = (vScroll & 0x30) >> 4;
-        vSOffset = (vScroll & 0x0F);
+        vSOffset = std::clamp(vScroll & 0x0F, 0, 11);
     }
     char color;
     char hScroll;

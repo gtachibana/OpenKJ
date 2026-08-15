@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QUrl>
 #include <QTimer>
+#include <QElapsedTimer>
 #include "settings.h"
 #include <spdlog/spdlog.h>
 #include <spdlog/async_logger.h>
@@ -54,6 +55,10 @@ private:
     QTimer *timer;
     QTimer *alertTimer;
     QTime lastSync;
+    // Monotonic companion to lastSync, for the staleness checks - see markSynchronized().
+    QElapsedTimer m_sinceLastSync;
+    void markSynchronized();
+    [[nodiscard]] int secsSinceLastSync() const;
     bool delayErrorEmitted;
     bool connectionReset;
     int entitledSystems;

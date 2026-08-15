@@ -59,7 +59,12 @@ public:
     // every other list in the app - this is the only place they can be seen.
     void setShowBadOnly(bool showBadOnly);
     [[nodiscard]] bool showBadOnly() const { return m_showBadOnly; }
+    // Returned by getSong() for a song id the library does not hold, the way
+    // TableModelRotation hands back InvalidSinger. Callers must check isValid():
+    // this is reached with ids that came off the network.
+    okj::KaraokeSong InvalidSong{.id = -1};
     int getIdForPath(const QString &path);
+    // Empty when the id is unknown.
     QString getPath(int songId);
     void updateSongHistory(int songId);
     okj::KaraokeSong &getSong(int songId);

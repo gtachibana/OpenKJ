@@ -24,7 +24,10 @@ CdgAppSrc::CdgAppSrc()
     g_object_set(m_cdgAppSrc, "stream-type", GST_APP_STREAM_TYPE_SEEKABLE, "format", GST_FORMAT_TIME, NULL);
     gst_app_src_set_max_bytes(m_cdgAppSrc, cdg::CDG_IMAGE_SIZE * 200);
 
-    GstAppSrcCallbacks callbacks;
+    // Zero-initialised: only the three function pointers are set below, and
+    // gst_app_src_set_callbacks copies the whole struct - _gst_reserved included -
+    // into the element, so the padding must not be stack garbage.
+    GstAppSrcCallbacks callbacks{};
     callbacks.need_data	  = &CdgAppSrc::cb_need_data;
     callbacks.enough_data = &CdgAppSrc::cb_enough_data;
     callbacks.seek_data   = &CdgAppSrc::cb_seek_data;

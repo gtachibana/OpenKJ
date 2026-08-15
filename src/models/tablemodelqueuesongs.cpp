@@ -266,7 +266,14 @@ int TableModelQueueSongs::add(const int songId) {
         m_logger->warn("{} Refusing to queue song id {} with no singer loaded", m_loggingPrefix, songId);
         return -1;
     }
+    // Song ids reach this from the network - /api.php submitRequest takes one straight
+    // from the request body - so an id the library does not hold is an ordinary event
+    // and has to stop here rather than become a queue row pointing at nothing.
     okj::KaraokeSong ksong = m_karaokeSongsModel.getSong(songId);
+    if (!ksong.isValid()) {
+        m_logger->warn("{} Refusing to queue unknown song id {}", m_loggingPrefix, songId);
+        return -1;
+    }
     QSqlQuery query;
     query.prepare("INSERT INTO queuesongs (singer,song,artist,title,discid,path,keychg,played,position) "
                   "VALUES (:singerId,:songId,:songId,:songId,:songId,:songId,:key,:played,:position)");
@@ -416,6 +423,11 @@ void TableModelQueueSongs::songAddSlot(int songId, int singerId, int keyChg) {
     } else {
         int newPos{0};
         okj::KaraokeSong ksong = m_karaokeSongsModel.getSong(songId);
+        if (!ksong.isValid()) {
+            m_logger->warn("{} Refusing to queue unknown song id {} for singer id {}", m_loggingPrefix, songId,
+                           singerId);
+            return;
+        }
         QSqlQuery query;
         query.prepare("SELECT COUNT(qsongid) FROM queuesongs WHERE singer = :singerId");
         query.bindValue(":singerId", singerId);

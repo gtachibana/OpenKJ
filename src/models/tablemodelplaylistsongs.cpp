@@ -235,11 +235,12 @@ int TableModelPlaylistSongs::randomizePlaylist() {
     int songPos{0};
     int newCurPos{-1};
     std::for_each(m_songs.begin(), m_songs.end(), [&](PlaylistSong &song) {
-        if (song.position == m_currentPosition) {
-            song.position = songPos++;
+        // Both branches renumbered the song identically; only remembering where the
+        // currently playing song landed differs, so that is all the condition guards.
+        const bool isCurrent = (song.position == m_currentPosition);
+        song.position = songPos++;
+        if (isCurrent)
             newCurPos = song.position;
-        } else
-            song.position = songPos++;
     });
     std::sort(m_songs.begin(), m_songs.end(), [](const PlaylistSong &a, const PlaylistSong &b) {
         return (a.position < b.position);
@@ -325,6 +326,9 @@ QStringList TableModelPlaylistSongs::mimeTypes() const {
 
 QMimeData *TableModelPlaylistSongs::mimeData(const QModelIndexList &indexes) const {
     auto mimeData = new QMimeData();
+    // Guarded like TableModelRotation::mimeData() - see the note there.
+    if (indexes.isEmpty())
+        return mimeData;
     mimeData->setData("integer/queuepos",
                       indexes.at(0).sibling(indexes.at(0).row(), COL_POSITION).data().toByteArray().data());
     if (indexes.size() > 1) {
