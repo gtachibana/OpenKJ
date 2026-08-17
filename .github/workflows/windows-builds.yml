@@ -29,6 +29,9 @@ jobs:
     - uses: actions/checkout@v5
       with:
         submodules: recursive
+        # Full history and tags, so the release-notes step can diff against the
+        # previous tag. The default shallow clone has neither.
+        fetch-depth: 0
 
     - uses: seanmiddleditch/gha-setup-ninja@master
 
@@ -299,6 +302,29 @@ jobs:
         7z a ../release/${{ env.branch }}/OpenKJ-${{ env.okjver }}-${{ matrix.bits }}bit.zip *
         cd ..
 
+    - name: Build release notes from the commit log
+      if: steps.get_version.outputs.is-semver == 'true'
+      shell: bash
+      run: |
+        # Nearest tag reachable from the tagged commit's parent, i.e. the
+        # previous release. Empty for the very first tag.
+        PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+        if [ -n "$PREV" ]; then
+          echo "Previous tag: $PREV"
+          RANGE="${PREV}..${GITHUB_REF_NAME}"
+        else
+          echo "No previous tag found, using full history"
+          RANGE="$GITHUB_REF_NAME"
+        fi
+
+        {
+          echo "## Changes"
+          echo
+          git log --no-merges --pretty='- %s' "$RANGE"
+        } > release-notes.md
+
+        cat release-notes.md
+
     - name: Release
       uses: softprops/action-gh-release@v2
       if: steps.get_version.outputs.is-semver == 'true'
@@ -307,6 +333,12 @@ jobs:
           installer/${{ env.branch }}/${{ env.installer_fn }}
           release/${{ env.branch }}/OpenKJ-${{ env.okjver }}-${{ matrix.bits }}bit.zip
         prerelease: ${{ env.rtype != 'release' }}
+        # Without a body the release renders empty and GitHub falls back to the
+        # annotated tag message, which is usually just the version number.
+        # GitHub appends its own generated notes (merged PRs + compare link)
+        # after body_path.
+        body_path: release-notes.md
+        generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
