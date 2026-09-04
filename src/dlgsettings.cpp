@@ -299,12 +299,11 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     connect(ui->spinBoxSlideshowInterval, qOverload<int>(&QSpinBox::valueChanged), this,
             &DlgSettings::slideShowIntervalChanged);
     connect(ui->checkBoxKAA, &QCheckBox::toggled, this, &DlgSettings::karaokeAutoAdvanceChanged);
-    connect(&m_settings, &Settings::showQueueRemovalWarningChanged, ui->cbxQueueRemovalWarning, &QCheckBox::setChecked);
-    connect(&m_settings, &Settings::showSingerRemovalWarningChanged, ui->cbxSingerRemovalWarning,
-            &QCheckBox::setChecked);
-    connect(&m_settings, &Settings::showSongInterruptionWarningChanged, ui->cbxSongInterruptionWarning,
-            &QCheckBox::setChecked);
-    connect(&m_settings, &Settings::showSongStopPauseWarningChanged, ui->cbxStopPauseWarning, &QCheckBox::setChecked);
+    // The four Settings::show*Changed connections that used to sit here were dead. Settings
+    // is held by value, so the confirmation-box checkboxes in MainWindow write through a
+    // different instance and never reach this one; the only emitter these could ever have
+    // heard was this dialog's own setter, one line below. The checkboxes are populated from
+    // QSettings each time the dialog is built, which is what actually keeps them current.
     connect(ui->cbxIgnoreApos, &QCheckBox::toggled, &m_settings, &Settings::setIgnoreAposInSearch);
     connect(ui->cbxCrossFade, &QCheckBox::toggled, &m_settings, &Settings::setBmKCrossfade);
     connect(ui->cbxCheckUpdates, &QCheckBox::toggled, &m_settings, &Settings::setCheckUpdates);
@@ -1127,6 +1126,11 @@ void DlgSettings::on_checkBoxNormalizeLoudness_toggled(bool checked) {
     if (!m_pageSetupDone)
         return;
     m_settings.setKaraokeNormalizeLoudness(checked);
+    // Settings is held by value in every class that wants one, so its own
+    // karaokeNormalizeLoudnessChanged() is emitted on this dialog's instance and reaches
+    // nobody else. MainWindow listened for it there and so never heard the toggle. The
+    // dialog signal is what the rest of this file uses to talk to MainWindow.
+    emit karaokeNormalizeLoudnessChanged(checked);
 }
 
 void DlgSettings::on_checkBoxDownmixBm_toggled(bool checked) {

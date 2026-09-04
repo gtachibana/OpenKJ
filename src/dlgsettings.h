@@ -141,6 +141,7 @@ signals:
     void tickerOutputModeChanged();
     void shortcutsChanged();
     void karaokeAutoAdvanceChanged(bool enabled);
+    void karaokeNormalizeLoudnessChanged(bool enabled);
     void enforceAspectRatioChanged(bool enabled);
     void treatAllSingersAsRegsChanged(bool enabled);
     void requestServerIntervalChanged(int interval);

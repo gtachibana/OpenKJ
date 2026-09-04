@@ -1036,16 +1036,6 @@ void MainWindow::setupConnections() {
     connect(bmDbDialog.get(), &BmDbDialog::bmDbAboutToUpdate, this, &MainWindow::bmDatabaseAboutToUpdate);
     connect(&m_timerKaraokeAA, &QTimer::timeout, this, &MainWindow::karaokeAATimerTimeout);
     connect(ui->actionAutoplay_mode, &QAction::toggled, &m_settings, &Settings::setKaraokeAutoAdvance);
-    connect(&m_settings, &Settings::karaokeNormalizeLoudnessChanged, this, [&](bool enabled) {
-        ui->tableViewDB->setColumnHidden(TableModelKaraokeSongs::COL_GAIN, !enabled);
-        if (enabled) {
-            m_lazyGainUpdater->getGains();
-        } else {
-            m_lazyGainUpdater->stopWork();
-            m_labelGainProgress.hide();
-        }
-    });
-
 
     connect(ui->lineEdit, &CustomLineEdit::escapePressed, ui->lineEdit, &CustomLineEdit::clear);
     connect(ui->lineEditBmSearch, &CustomLineEdit::escapePressed, ui->lineEditBmSearch, &CustomLineEdit::clear);
@@ -2093,6 +2083,15 @@ void MainWindow::actionSettingsTriggered() {
     connect(settingsDialog, &DlgSettings::enforceAspectRatioChanged, &m_mediaBackendKar, &MediaBackend::setEnforceAspectRatio);
     connect(settingsDialog, &DlgSettings::enforceAspectRatioChanged, &m_mediaBackendBm, &MediaBackend::setEnforceAspectRatio);
     connect(settingsDialog, &DlgSettings::karaokeAutoAdvanceChanged, ui->actionAutoplay_mode, &QAction::setChecked);
+    connect(settingsDialog, &DlgSettings::karaokeNormalizeLoudnessChanged, this, [this](bool enabled) {
+        ui->tableViewDB->setColumnHidden(TableModelKaraokeSongs::COL_GAIN, !enabled);
+        if (enabled) {
+            m_lazyGainUpdater->getGains();
+        } else {
+            m_lazyGainUpdater->stopWork();
+            m_labelGainProgress.hide();
+        }
+    });
     connect(settingsDialog, &DlgSettings::audioUseFaderChanged, &m_mediaBackendKar, &MediaBackend::setUseFader);
     connect(settingsDialog, &DlgSettings::audioSilenceDetectChanged, &m_mediaBackendKar,
             &MediaBackend::setUseSilenceDetection);
