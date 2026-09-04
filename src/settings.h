@@ -51,7 +51,12 @@ class Settings : public QObject
 
 private:
     QSettings *settings;
-    bool m_safeStartupMode{false};
+    // Process-wide, deliberately. Every other piece of state in this class lives in
+    // QSettings and is therefore shared by all instances; this one did not, so the flag
+    // main() set on its own Settings object was invisible to the 33 instances that
+    // actually call the restore functions below - which meant answering "yes, load safe
+    // settings" after a failed startup restored the broken geometry anyway.
+    inline static bool m_safeStartupMode{false};
     QString modeScopedKey(const QString &key, int mode) const;
     QVariant scopedValue(const QString &key, const QVariant &defaultValue, bool fallbackLegacy = true, int mode = -1) const;
     void setScopedValue(const QString &key, const QVariant &value, int mode = -1);
