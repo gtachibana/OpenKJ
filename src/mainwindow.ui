@@ -3459,6 +3459,8 @@ QPushButton:default {
     <addaction name="actionVideo_Output_2"/>
     <addaction name="actionMultiplex_Controls"/>
     <addaction name="menuVideo_Output_Size"/>
+    <addaction name="separator"/>
+    <addaction name="actionQueue_Display"/>
    </widget>
    <widget class="QMenu" name="menuTesting">
     <property name="title">
@@ -3612,6 +3614,14 @@ QPushButton:default {
    </property>
    <property name="text">
     <string>Show Debug Log</string>
+   </property>
+  </action>
+  <action name="actionQueue_Display">
+   <property name="text">
+    <string>Queue Display Window</string>
+   </property>
+   <property name="toolTip">
+    <string>Audience-facing rotation and scan-to-request display for a second screen</string>
    </property>
   </action>
   <action name="actionNow_Playing">

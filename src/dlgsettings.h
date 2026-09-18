@@ -64,6 +64,7 @@ private:
     QComboBox *m_comboAppMode{nullptr};
     QGroupBox *m_groupBoxLocalMode{nullptr};
     QLineEdit *m_lineEditLocalUiUrl{nullptr};
+    QLineEdit *m_lineEditRequestSiteUrl{nullptr};
     QLineEdit *m_lineEditEmbeddedBindAddress{nullptr};
     QSpinBox *m_spinBoxEmbeddedPort{nullptr};
     QSpinBox *m_spinBoxUpNextTurns{nullptr};

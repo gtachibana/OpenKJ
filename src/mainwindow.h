@@ -33,6 +33,7 @@
 #include "dlgsettings.h"
 #include "mediabackend.h"
 #include "dlgcdg.h"
+#include "dlgqueuedisplay.h"
 #include "settings.h"
 #include "dlgregularsingers.h"
 #include "dlgregularexport.h"
@@ -132,6 +133,10 @@ private:
     std::unique_ptr<QSqlTableModel> m_tableModelPlaylists;
     ItemDelegatePlaylistSongs m_itemDelegatePlSongs{this};
     std::unique_ptr<DlgCdg> cdgWindow;
+    // The audience-facing rotation display, for a TV or a projector on another screen.
+    // Constructed hidden with the main window so the once-a-second UI tick always has
+    // something to hand its now-playing state to, whether or not the KJ has opened it.
+    std::unique_ptr<DlgQueueDisplay> m_dlgQueueDisplay;
     std::unique_ptr<DlgDatabase> dbDialog;
     std::unique_ptr<DlgKeyChange> dlgKeyChange;
     std::unique_ptr<DlgRequests> requestsDialog;
