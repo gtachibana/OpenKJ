@@ -356,6 +356,10 @@ public:
     void setYoutubeDropOnEarlySkip(bool drop);
     QString localUiUrl();
     void setLocalUiUrl(const QString &url);
+    // The address printed and QR-encoded on the queue display window. Empty means the
+    // KJ hasn't set one, and the display leaves the whole panel out.
+    QString requestSiteUrl();
+    void setRequestSiteUrl(const QString &url);
     bool bmKCrossFade();
     bool requestRemoveOnRotAdd();
     bool requestDialogAutoShow();

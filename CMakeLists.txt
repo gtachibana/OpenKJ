@@ -415,6 +415,11 @@ set(SOURCE_FILES
         ${TAGLIB_SOURCES}
         src/miniz/miniz.h
         src/miniz/miniz.c
+        # Nayuki's QR Code generator (MIT), vendored rather than added as a dependency:
+        # two files, no build system of its own, and it is the only thing in the tree
+        # that needs to draw a QR code.
+        src/3rdparty/qrcodegen/qrcodegen.hpp
+        src/3rdparty/qrcodegen/qrcodegen.cpp
         src/main.cpp
         src/dlgaddsong.cpp
         src/mediabackend.cpp
@@ -434,6 +439,7 @@ set(SOURCE_FILES
         src/dlgregularsingers.cpp
         src/dlgsettings.cpp
         src/dlgcdg.cpp
+        src/dlgqueuedisplay.cpp
         src/okarchive.cpp
         src/models/tablemodelbreaksongs.cpp
         src/models/tablemodelcustomnamingpatterns.cpp
@@ -503,6 +509,7 @@ set(SOURCE_FILES
         src/dlgregularsingers.h
         src/dlgsettings.h
         src/dlgcdg.h
+        src/dlgqueuedisplay.h
         src/okarchive.h
         src/models/tablemodelbreaksongs.h
         src/models/tablemodelcustomnamingpatterns.h

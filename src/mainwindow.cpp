@@ -721,6 +721,9 @@ MainWindow::MainWindow(QWidget *parent) :
     }
     ui->videoPreview->setFillOnPaint(true);
     cdgWindow = std::make_unique<DlgCdg>(m_mediaBackendKar, m_mediaBackendBm, nullptr, Qt::Window);
+    // Parented to nothing, like the CDG window: it belongs on a different screen and
+    // must not be dragged around by, or stacked on top of, the main window.
+    m_dlgQueueDisplay = std::make_unique<DlgQueueDisplay>(m_rotModel, nullptr);
     ui->tableViewDB->hideColumn(TableModelKaraokeSongs::COL_ID);
     ui->tableViewDB->hideColumn(TableModelKaraokeSongs::COL_FILENAME);
     // Only worth screen space when loudness leveling is actually on.
@@ -1035,6 +1038,11 @@ void MainWindow::setupConnections() {
     connect(bmDbDialog.get(), &BmDbDialog::bmDbCleared, this, &MainWindow::bmDbCleared);
     connect(bmDbDialog.get(), &BmDbDialog::bmDbAboutToUpdate, this, &MainWindow::bmDatabaseAboutToUpdate);
     connect(&m_timerKaraokeAA, &QTimer::timeout, this, &MainWindow::karaokeAATimerTimeout);
+    connect(ui->actionQueue_Display, &QAction::triggered, this, [&]() {
+        m_dlgQueueDisplay->show();
+        m_dlgQueueDisplay->raise();
+        m_dlgQueueDisplay->activateWindow();
+    });
     connect(ui->actionAutoplay_mode, &QAction::toggled, &m_settings, &Settings::setKaraokeAutoAdvance);
 
     connect(ui->lineEdit, &CustomLineEdit::escapePressed, ui->lineEdit, &CustomLineEdit::clear);
@@ -3823,6 +3831,11 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     cdgWindow->setVisible(false);
     dlgSongShop->setVisible(false);
     requestsDialog->setVisible(false);
+    // Parentless, like the CDG window, so closing the main window doesn't take it with
+    // it - and a visible top-level window left behind keeps the process alive.
+    if (m_dlgQueueDisplay->isVisible()) {
+        m_dlgQueueDisplay->close();
+    }
     event->accept();
 }
 
@@ -4264,6 +4277,17 @@ void MainWindow::updateRotationDuration() {
     } else
         text = " Rotation Duration: 0 min";
     m_labelRotationDuration.setText(text);
+
+    // Piggy-backed on the rotation-duration tick rather than given a timer of its own:
+    // this runs once a second whether or not the display is open, and it is the only
+    // place that knows both the song actually on and whether it is still running.
+    if (m_dlgQueueDisplay && m_dlgQueueDisplay->isVisible()) {
+        const auto karState = m_mediaBackendKar.state();
+        m_dlgQueueDisplay->setNowPlaying(m_curSinger, m_curArtist, m_curTitle,
+                                         karState == MediaBackend::PlayingState ||
+                                         karState == MediaBackend::PausedState);
+        m_dlgQueueDisplay->refresh();
+    }
 }
 
 void MainWindow::rotationSelectionChanged(const QItemSelection &selected, const QItemSelection &deselected) {

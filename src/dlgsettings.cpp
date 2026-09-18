@@ -473,6 +473,24 @@ void DlgSettings::setupModeWidgets()
         m_settings.setEmbeddedApiUpNextTurns(turns);
     });
 
+    // Its own box, outside the Local Mode group and not scoped to a mode: the queue
+    // display is a screen in the room either way, and hiding this in Classic would
+    // leave that screen with no way to tell people where to request.
+    auto *displayBox = new QGroupBox(tr("Queue Display Window"), ui->tabWidgetPage3);
+    auto *displayLayout = new QFormLayout(displayBox);
+    m_lineEditRequestSiteUrl = new QLineEdit(m_settings.requestSiteUrl(), displayBox);
+    m_lineEditRequestSiteUrl->setPlaceholderText(tr("https://requests.example.com"));
+    m_lineEditRequestSiteUrl->setToolTip(
+            tr("The address singers type or scan to request songs. Shown as a QR code on the queue\n"
+               "display window. Leave empty to hide the panel - OpenKJ cannot work this address out\n"
+               "for itself, because the request site is a separate app on your own hostname."));
+    displayLayout->addRow(tr("Request site URL"), m_lineEditRequestSiteUrl);
+    networkLayout->insertWidget(2, displayBox);
+
+    connect(m_lineEditRequestSiteUrl, &QLineEdit::editingFinished, this, [&]() {
+        m_settings.setRequestSiteUrl(m_lineEditRequestSiteUrl->text().trimmed());
+    });
+
     setupYoutubeWidgets(networkLayout);
 }
 

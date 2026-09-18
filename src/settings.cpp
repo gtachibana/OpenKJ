@@ -1933,6 +1933,26 @@ void Settings::setLocalUiUrl(const QString &url)
     setScopedValue("localUiUrl", url, LocalMode);
 }
 
+QString Settings::requestSiteUrl()
+{
+    // Where the singers' phones go to request, as they would type it - which is not
+    // something OpenKJ can work out for itself. The request site is a separate app,
+    // usually reached over a tunnel or a venue hostname, and the address that finally
+    // reaches it belongs to whoever set that up. Empty until the KJ fills it in, and
+    // the queue display simply leaves the QR panel out rather than putting an address
+    // on a screen in front of a room that nobody can reach.
+    return settings->value("requestSiteUrl", "").toString().trimmed();
+}
+
+void Settings::setRequestSiteUrl(const QString &url)
+{
+    // No change signal: every Settings instance carries its own QSettings, so one
+    // would only ever reach objects connected to whichever instance did the writing.
+    // The queue display reads this on its repaint tick and picks the change up within
+    // a second, which is the same way it tracks everything else on screen.
+    settings->setValue("requestSiteUrl", url.trimmed());
+}
+
 bool Settings::bmKCrossFade()
 {
     return settings->value("bmKCrossFade", true).toBool();
