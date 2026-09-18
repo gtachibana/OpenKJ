@@ -31,7 +31,8 @@ jobs:
           if [ "${{ steps.get_version.outputs.is-semver }}" = "true" ];then
             if [ "${{ steps.get_version.outputs.prerelease }}" = "" ];then
               RTYPE="release"
-              BRANCH="release"
+              # rtype is the label; this fork only has master, no release branch
+              BRANCH="master"
             elif [ "${{ steps.get_version.outputs.prerelease }}" = "unstable" ];then
               RTYPE="unstable"
               BRANCH="master"
