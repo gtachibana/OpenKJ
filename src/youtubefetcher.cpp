@@ -101,18 +101,21 @@ bool songPathIsPlayable(const QString &path) {
     // Returns no rows for anything that isn't a fetched video, which is what makes
     // this a no-op for the library: one indexed lookup on dbsongs.path and out.
     QSqlQuery query;
-    query.prepare("SELECT COALESCE(yf.state, '') FROM dbsongs d "
-                  "LEFT JOIN local_youtube_fetches yf ON yf.songid = d.songid "
-                  "WHERE d.path = :path AND d.discid = :discid");
+    query.prepare("SELECT 1 FROM dbsongs WHERE path = :path AND discid = :discid");
     query.bindValue(":path", path);
     query.bindValue(":discid", QString(kYoutubeDiscId));
     if (!query.exec() || !query.next()) {
         return true;
     }
 
-    // The row and the file both have to agree, so a cache the KJ emptied by hand
-    // cannot leave the rotation trying to play something that is gone.
-    return query.value(0).toString() == QLatin1String("ready") && QFileInfo::exists(path);
+    // The file on disk is the authority, not the local_youtube_fetches row. That row
+    // can be absent for a video that is sitting right there in the cache - enqueue()
+    // skips the upsert when the file is already downloaded, and the cache sweep
+    // deletes the row once a video's queue entries are played - and while this
+    // required a state of "ready", such a song was unplayable forever. Nothing says
+    // so: the rotation just passes over the singer every single round, with no
+    // italics, no warning and no entry in the log.
+    return QFileInfo::exists(path);
 }
 
 YoutubeFetcher::YoutubeFetcher(Settings &settings, QObject *parent)
