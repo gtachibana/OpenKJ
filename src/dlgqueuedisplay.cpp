@@ -28,6 +28,7 @@
 #include <QRegularExpression>
 #include <algorithm>
 #include <stdexcept>
+#include <spdlog/spdlog.h>
 
 #include "3rdparty/qrcodegen/qrcodegen.hpp"
 #include "models/tablemodelrotation.h"
