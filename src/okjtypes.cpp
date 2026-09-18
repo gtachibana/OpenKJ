@@ -19,10 +19,12 @@
 */
 
 #include "okjtypes.h"
+#include <QFileInfo>
 #include <QSqlQuery>
 #include <QSqlError>
 #include <utility>
 #include <spdlog/spdlog.h>
+#include "youtubefetcher.h"
 
 namespace okj {
 
@@ -142,6 +144,41 @@ namespace okj {
         if (query.first())
             return query.value(0).toInt();
         return -1;
+    }
+
+    QString RotationSinger::nextSongUnplayableReason() const {
+        QSqlQuery query;
+        query.prepare(
+                "SELECT d.path, d.discid, COALESCE(yf.state, ''), COALESCE(yf.progress, 0) "
+                "FROM queuesongs q "
+                "INNER JOIN dbsongs d ON d.songid = q.song "
+                "LEFT JOIN local_youtube_fetches yf ON yf.songid = q.song "
+                "WHERE q.singer = :singerid AND q.played = 0 "
+                "ORDER BY q.position LIMIT 1");
+        query.bindValue(":singerid", id);
+        query.exec();
+        if (auto lastError = query.lastError(); lastError.type() != QSqlError::NoError)
+            m_logger->error("{} DB error! Error while querying the db on disk! Error: {}", loggingPrefix(),
+                            lastError.text().toStdString());
+        if (!query.first())
+            return {};
+        // Nothing to say about a singer with an empty queue, and a library song is
+        // always offered to the player - a missing file there is reported when the
+        // song is started, not by passing the singer over. Keep in step with
+        // songPathIsPlayable(), which decides the same thing for the rotation.
+        if (query.value(1).toString() != QLatin1String(kYoutubeDiscId))
+            return {};
+        const QString path = query.value(0).toString();
+        if (QFileInfo::exists(path))
+            return {};
+        const QString state = query.value(2).toString();
+        if (state == QLatin1String("fetching"))
+            return QString("downloading %1%").arg(query.value(3).toInt());
+        if (state == QLatin1String("pending"))
+            return "waiting to download";
+        if (state == QLatin1String("failed"))
+            return "download failed";
+        return "video not downloaded";
     }
 
     int RotationSinger::numSongsSung() const {

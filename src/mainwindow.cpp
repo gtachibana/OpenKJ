@@ -5089,8 +5089,17 @@ bool MainWindow::findNextPlayableSinger(const int startPosition, const bool defe
                 // playable yet. Pass over the singer for this round rather than stalling
                 // the rotation or spending their turn on a file that isn't there - the
                 // request stays queued and comes back around on the next pass.
-                if (const QString candidate = nextSinger.nextSongPath(); songPathIsPlayable(candidate))
+                if (const QString candidate = nextSinger.nextSongPath(); songPathIsPlayable(candidate)) {
                     nextSongPath = candidate;
+                } else if (!candidate.isEmpty()) {
+                    // Logged because the pass-over is otherwise invisible: from the
+                    // floor it just looks like the singer is being skipped, and a
+                    // download that never lands makes that permanent.
+                    m_logger->info("{} Passing over {} - next song is not playable ({}): {}", m_loggingPrefix,
+                                   nextSinger.name.toStdString(),
+                                   nextSinger.nextSongUnplayableReason().toStdString(),
+                                   candidate.toStdString());
+                }
             }
             loops++;
         }

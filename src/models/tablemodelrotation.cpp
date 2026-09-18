@@ -165,10 +165,19 @@ QVariant TableModelRotation::getDisplayData(const QModelIndex &index) const {
             return m_singers.at(index.row()).regular;
         case COL_ADDTS:
             return m_singers.at(index.row()).addTs;
-        case COL_NEXT_SONG:
-            if (m_settings.rotationShowNextSong())
-                return m_singers.at(index.row()).nextSongArtistTitle();
-            return {};
+        case COL_NEXT_SONG: {
+            if (!m_settings.rotationShowNextSong())
+                return {};
+            const auto &singer = m_singers.at(index.row());
+            const QString song = singer.nextSongArtistTitle();
+            // A singer whose next song can't be started is passed over by the
+            // automatic advance, which otherwise looks exactly like nothing
+            // happening. Say so on the row rather than leaving the KJ to work out
+            // why the rotation keeps stepping around somebody.
+            if (const QString reason = singer.nextSongUnplayableReason(); !reason.isEmpty())
+                return song + "  [" + reason + "]";
+            return song;
+        }
         default:
             return {};
     }
@@ -190,6 +199,16 @@ QVariant TableModelRotation::getTooltipData(const QModelIndex &index) const {
     toolTipText += "\nTime Added: " + m_singers.at(index.row()).addTs.toString("h:mm a");
     if (totalWaitDuration > 0) {
         toolTipText += "\n" + getWaitTimeString(totalWaitDuration);
+    }
+    // The two reasons the rotation passes a singer over. Both are easy to miss on the
+    // row itself - the italics are subtle and the Next Song column is often off - and
+    // a singer who keeps missing their turn for either reason is the first thing the
+    // KJ goes looking for an explanation of.
+    if (singer.paused) {
+        toolTipText += "\nStepped away - will be passed over until marked back";
+    }
+    if (const QString reason = singer.nextSongUnplayableReason(); !reason.isEmpty()) {
+        toolTipText += "\nNext song can't be played (" + reason + ") - will be passed over";
     }
     return QString(toolTipText);
 }

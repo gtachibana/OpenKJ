@@ -39,10 +39,12 @@ bool isValidYoutubeVideoId(const QString &videoId);
 // that is a different failure with its own handling at play time, and changing it
 // here would quietly alter how the rotation treats a slow network share.
 //
-// False only for a video whose download has not finished. Callers walking the
-// rotation use this to pass over a singer rather than stall the show or burn their
-// turn on a file that isn't there yet; the request stays queued and comes back
-// around on the next pass.
+// False only for a video that is not on disk - still downloading, failed, or evicted
+// from the cache. Callers walking the rotation use this to pass over a singer rather
+// than stall the show or burn their turn on a file that isn't there yet; the request
+// stays queued and comes back around on the next pass. Because that pass-over is
+// silent, anything that makes it permanent strands the singer, so ask the filesystem
+// rather than the fetch bookkeeping - see the note in the implementation.
 bool songPathIsPlayable(const QString &path);
 
 // How far into a video a singer can bail out and still have it read as "this was the

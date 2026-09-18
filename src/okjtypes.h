@@ -101,6 +101,14 @@ namespace okj {
         [[nodiscard]] int nextSongDurationSecs() const;
         [[nodiscard]] int nextSongKeyChg() const;
         [[nodiscard]] int nextSongQueueId() const;
+        // Empty when the singer's next song can be started right now, which is the
+        // case for every ordinary library song. Otherwise a few words saying what is
+        // wrong with it - a video still downloading, one whose download failed, one
+        // whose file has gone from the cache. The rotation's automatic advance passes
+        // over a singer whose next song isn't playable without saying anything, so
+        // without this the KJ watches a singer miss turn after turn with nothing on
+        // screen to explain it. Shown in the Next Song column and the row tooltip.
+        [[nodiscard]] QString nextSongUnplayableReason() const;
         [[nodiscard]] int numSongsSung() const;
         [[nodiscard]] int numSongsUnsung() const;
     };
