@@ -237,7 +237,21 @@ private:
     void setAccepting(bool accepting);
 
     QJsonObject commandSearch(const QJsonObject &payload);
-    QJsonObject commandSubmitRequest(const QJsonObject &payload);
+    // singerName picks the queue the song lands in, and on the legacy surface it
+    // arrives with no credentials at all, so who the caller is has to come in
+    // alongside it. authorizedUser is the normalized account the caller has proved
+    // they are - empty for a guest - and asAdmin is the KJ, who queues for anyone.
+    // A name nobody has registered is fair game either way; see
+    // nameIsClaimedByAnotherUser().
+    QJsonObject commandSubmitRequest(const QJsonObject &payload, const QString &authorizedUser = {},
+                                     bool asAdmin = false);
+    // Whether singerName belongs to a registered account that the caller has not
+    // proved they are. Guest requests are the whole point of the legacy surface, but
+    // an account's name is the only thing tying that account to its rotation row and
+    // its queue: without this, anyone on the venue's wifi can push songs into a
+    // signed-in singer's queue, or claim their name in the rotation before they
+    // arrive and inherit everything that follows.
+    bool nameIsClaimedByAnotherUser(const QString &singerName, const QString &authorizedUser) const;
     QJsonObject commandGetRequests();
     QJsonObject commandDeleteRequest(const QJsonObject &payload);
     QJsonObject commandSetAccepting(const QJsonObject &payload);

@@ -933,7 +933,17 @@ QJsonObject OpenKJEmbeddedApi::handleApiCommand(const QJsonObject &payload)
     }
 
     if (command == "submitRequest") {
-        return commandSubmitRequest(payload);
+        // Unauthenticated by design - a guest types a name and requests a song - but
+        // a caller who did present credentials gets to use them, so a singer's own
+        // client can queue under their account name and the KJ's can queue for
+        // anyone. Everyone else is a guest, whatever name they typed.
+        const QString token = payload.value("token").toString().trimmed();
+        if (isValidAdminSession(token)) {
+            return commandSubmitRequest(payload, {}, true);
+        }
+        QString normalized;
+        isValidUserSession(token, &normalized);
+        return commandSubmitRequest(payload, normalized);
     }
 
     if (command == "getRequests") {
@@ -1049,7 +1059,21 @@ QJsonObject OpenKJEmbeddedApi::commandSearch(const QJsonObject &payload)
     return out;
 }
 
-QJsonObject OpenKJEmbeddedApi::commandSubmitRequest(const QJsonObject &payload)
+bool OpenKJEmbeddedApi::nameIsClaimedByAnotherUser(const QString &singerName, const QString &authorizedUser) const
+{
+    const QString normalized = normalizeUsername(singerName);
+    if (!authorizedUser.isEmpty() && authorizedUser == normalized) {
+        return false;
+    }
+
+    QSqlQuery query;
+    query.prepare("SELECT 1 FROM local_users WHERE username_normalized = :username");
+    query.bindValue(":username", normalized);
+    return query.exec() && query.next();
+}
+
+QJsonObject OpenKJEmbeddedApi::commandSubmitRequest(const QJsonObject &payload, const QString &authorizedUser,
+                                                   const bool asAdmin)
 {
     if (!isAccepting()) {
         QJsonObject out;
@@ -1088,6 +1112,20 @@ QJsonObject OpenKJEmbeddedApi::commandSubmitRequest(const QJsonObject &payload)
         out.insert("command", "submitRequest");
         out.insert("error", "true");
         out.insert("errorString", "Unknown songId");
+        return out;
+    }
+
+    // Checked before the singer is looked up or created, so a guest can neither add
+    // to a registered singer's queue nor take their name in the rotation. Deliberately
+    // not phrased as "wrong password": the name is not secret, and the singer standing
+    // at the machine needs to be told to sign in, not that they got something wrong.
+    if (!asAdmin && nameIsClaimedByAnotherUser(singerName, authorizedUser)) {
+        QJsonObject out;
+        out.insert("command", "submitRequest");
+        out.insert("error", "true");
+        out.insert("errorString", QString("%1 is a registered singer - sign in as %1 to add songs to that queue")
+                                          .arg(singerName));
+        out.insert("requiresLogin", true);
         return out;
     }
 
@@ -1766,6 +1804,10 @@ QJsonObject OpenKJEmbeddedApi::buildCapabilities() const
         {"supportsFavorites", true},
         {"supportsUserHistory", true},
         {"supportsAwayToggle", true},
+        // A guest submitRequest naming a registered singer is refused with
+        // "requiresLogin": true rather than dropped into that singer's queue.
+        // Clients should turn that into a sign-in prompt for the name they typed.
+        {"claimedNamesRequireLogin", true},
         {"supportsReorderOwnQueue", true},
         // The singer at the mic can end their own song early via
         // POST /local/request/skip. Only offer the control while
@@ -2960,7 +3002,9 @@ QJsonObject OpenKJEmbeddedApi::requestSongFromLocalUser(const QJsonObject &paylo
     QJsonObject legacyPayload;
     legacyPayload.insert("songId", payload.value("songId"));
     legacyPayload.insert("singerName", username);
-    const QJsonObject response = commandSubmitRequest(legacyPayload);
+    // The session above is the proof that this caller is that singer, so the name
+    // check inside passes them through to their own queue.
+    const QJsonObject response = commandSubmitRequest(legacyPayload, normalized);
     if (response.value("error").toString() == "false" || response.value("success").toBool()) {
         QSqlQuery query;
         query.prepare("SELECT MAX(qsongid) FROM queuesongs qs "
