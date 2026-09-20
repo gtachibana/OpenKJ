@@ -120,11 +120,18 @@ QVector<DlgQueueDisplay::UpNextEntry> DlgQueueDisplay::upNextEntries(const int l
         const auto &singer = m_rotationModel.getSingerAtPosition((start + offset) % singerCount);
         if (!singer.isValid() || singer.id == currentId)
             continue;
+        // Nothing queued means this singer is not actually up: findNextPlayableSinger
+        // walks past an empty queue, and the model sinks those singers below everyone
+        // with songs. Listing them would promise the room a turn that never comes - and
+        // a rotation nobody cleared since a previous show is all names and no songs, so
+        // the screen would be advertising people who aren't in the building. The video
+        // ticker's "up next" leaves them out for the same reason.
+        if (singer.numSongsUnsung() < 1)
+            continue;
 
         UpNextEntry entry;
         entry.name = singer.name;
-        if (singer.numSongsUnsung() > 0)
-            entry.song = singer.nextSongArtistTitle();
+        entry.song = singer.nextSongArtistTitle();
 
         // The two states that decide whether this singer's turn actually happens. The
         // room is the audience for both of them: somebody who marked themselves away
@@ -132,8 +139,6 @@ QVector<DlgQueueDisplay::UpNextEntry> DlgQueueDisplay::upNextEntries(const int l
         // gone, and somebody whose video is downloading can see why they are waiting.
         if (singer.paused)
             entry.note = "stepped away";
-        else if (entry.song.isEmpty())
-            entry.note = "no song picked yet";
         else if (const QString reason = singer.nextSongUnplayableReason(); !reason.isEmpty())
             entry.note = reason;
 
@@ -231,7 +236,7 @@ void DlgQueueDisplay::paintUpNext(QPainter &painter, const QRect &area) {
         painter.setFont(songFont);
         painter.setPen(kDimText);
         painter.drawText(QRect(area.left(), listTop, area.width(), nameMetrics.height()),
-                         Qt::AlignLeft | Qt::AlignVCenter, "Nobody else in the rotation yet");
+                         Qt::AlignLeft | Qt::AlignVCenter, "Nobody else has a song queued yet");
         return;
     }
 
