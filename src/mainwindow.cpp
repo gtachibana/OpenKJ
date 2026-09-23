@@ -2516,6 +2516,9 @@ void MainWindow::rotationDataChanged() {
         return;
     m_logger->trace("{} [{}] Called", m_loggingPrefix, __func__);
     auto st = std::chrono::high_resolution_clock::now();
+    // The model's current singer can be moved from the remote admin, which has no
+    // handle on the delegate that draws the mic icon.
+    m_rotDelegate.setCurrentSinger(m_rotModel.currentSinger());
     if (m_settings.rotationShowNextSong())
         autosizeRotationCols();
     updateRotationDuration();
