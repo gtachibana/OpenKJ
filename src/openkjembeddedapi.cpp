@@ -18,6 +18,8 @@
 #include <QUuid>
 #include <QPasswordDigestor>
 
+#include "searchfold.h"
+
 namespace {
 
 // Every request this API serves is a short JSON envelope or a bare GET, so these
@@ -789,20 +791,20 @@ QByteArray OpenKJEmbeddedApi::handleRequest(const HttpRequest &request)
             return jsonResponse(400, out);
         }
 
-        const QString primary = (by == "title") ? "title" : "artist";
-        const QString secondary = (by == "title") ? "artist" : "title";
+        const QString primary = (by == "title") ? "titlefold" : "artistfold";
+        const QString secondary = (by == "title") ? "artistfold" : "titlefold";
 
-        // artist and title are COLLATE NOCASE columns, so a bare prefix LIKE is already
-        // case-insensitive and - unlike upper(trim(col)) - SQLite can turn it into a range
-        // seek on idx_dbsongs_artist_title. Values are trimmed on ingest and by the v109
-        // migration, so dropping trim() here doesn't lose rows. Sorting on the bare
-        // columns keeps the same order while letting the index supply it.
+        // Matched and sorted on the accent-folded columns (see dbInit() v111), so
+        // "Édith Piaf" is under E and sorts with the other E's rather than after Z.
+        // They are COLLATE NOCASE, which is what lets SQLite turn the prefix LIKE into
+        // a range seek on idx_dbsongs_fold; the source values are trimmed on ingest,
+        // so a leading space can't drop a row out of its letter.
         QSqlQuery query;
         query.prepare(QString("SELECT songid, artist, title, COALESCE(duration, 0), discid FROM dbsongs "
                               "WHERE %3"
                               "AND %1 LIKE :prefix "
                               "ORDER BY %1, %2 LIMIT :limit").arg(primary, secondary, catalogFilterSql()));
-        query.bindValue(":prefix", letter + "%");
+        query.bindValue(":prefix", letter.toLower() + "%");
         query.bindValue(":limit", limit);
 
         QJsonArray songs;
@@ -1018,21 +1020,22 @@ QJsonObject OpenKJEmbeddedApi::commandSearch(const QJsonObject &payload)
     QString sql = "SELECT songid, artist, title, COALESCE(duration, 0), discid FROM dbsongs "
                   "WHERE " + catalogFilterSql();
     if (!terms.isEmpty()) {
-        // No lower() on the column: SQLite's LIKE is already case-insensitive for ASCII
-        // (and its lower() only folds ASCII anyway), so the wrapper only cost a function
-        // call per row. Terms are still bound lowercased below.
+        // Against the accent-folded columns with folded terms, so "beyonce" finds
+        // "Beyoncé" - SQLite's LIKE only folds ASCII case, and not accents at all. A
+        // row renamed a moment ago has its folds cleared until the next refresh, so it
+        // falls back to the raw names rather than dropping out of results meanwhile.
         for (int i = 0; i < terms.size(); ++i) {
-            sql += QString("AND (artist || ' ' || title) LIKE :term%1 ").arg(i);
+            sql += QString("AND (COALESCE(artistfold, artist) || ' ' || COALESCE(titlefold, title)) "
+                           "LIKE :term%1 ").arg(i);
         }
     }
-    // Sorting the bare NOCASE columns rather than upper() of them lets
-    // idx_dbsongs_artist_title supply the order, so SQLite can stop at LIMIT instead of
-    // materializing every match into a temp B-tree first.
-    sql += QString("ORDER BY artist, title LIMIT %1").arg(limit);
+    // The folded columns carry idx_dbsongs_fold, so the index supplies the order and
+    // SQLite can stop at LIMIT instead of sorting every match into a temp B-tree first.
+    sql += QString("ORDER BY artistfold, titlefold LIMIT %1").arg(limit);
 
     query.prepare(sql);
     for (int i = 0; i < terms.size(); ++i) {
-        query.bindValue(QString(":term%1").arg(i), QString("%%1%").arg(terms.at(i).toLower()));
+        query.bindValue(QString(":term%1").arg(i), QString("%%1%").arg(okj::foldForSearch(terms.at(i))));
     }
 
     QJsonArray songs;

@@ -17,6 +17,7 @@
 #include "gainlazyupdater.h"
 #include "okjfmt.h"
 #include "okjutil.h"
+#include "searchfold.h"
 
 namespace {
 
@@ -24,7 +25,9 @@ namespace {
     // against. The contains() guards keep QString's implicit sharing intact for
     // the common case, so songs without an '&' or apostrophe don't allocate.
     QString normalizeHaystack(const QString &src, bool ignoreApos) {
-        QString s = src.toLower();
+        // Folded rather than just lowercased, so a query typed without accents still
+        // finds songs that have them. The needles below go through the same fold.
+        QString s = okj::foldForSearch(src);
         if (s.contains('&'))
             s.replace('&', " and ");
         if (ignoreApos && s.contains('\''))
@@ -34,7 +37,7 @@ namespace {
 
     // Normalizes the user's query into whitespace-separated needles.
     QString normalizeNeedles(const QString &raw, bool ignoreApos) {
-        QString s = raw.toLower();
+        QString s = okj::foldForSearch(raw);
         s.replace(',', ' ');
         s.replace('&', " and ");
         if (ignoreApos)
@@ -217,6 +220,9 @@ QString TableModelKaraokeSongs::gainDisplayText(const double gain) {
 }
 
 void TableModelKaraokeSongs::loadData() {
+    // Every bulk change to the library - a rescan, an edit, a name cleanup - ends in a
+    // reload, which makes this the place to catch up the embedded API's search folds.
+    okj::refreshSearchFolds();
     emit layoutAboutToBeChanged();
     m_allSongs.clear();
     m_filteredSongs.clear();
@@ -676,6 +682,8 @@ int TableModelKaraokeSongs::addSong(okj::KaraokeSong song) {
     } else {
         int lastInsertId = query.lastInsertId().toInt();
         song.id = lastInsertId;
+        // A YouTube request adds its row here and is searchable from the phones at once.
+        okj::refreshSearchFolds();
         auto newSong = m_allSongs.emplace_back(std::make_shared<okj::KaraokeSong>(song));
         setSearchHaystacks(*newSong, m_haystacksIgnoreApos);
         m_songsByPath.insert(newSong->path, newSong);
