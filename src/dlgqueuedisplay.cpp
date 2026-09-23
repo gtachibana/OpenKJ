@@ -143,7 +143,9 @@ QVector<DlgQueueDisplay::UpNextEntry> DlgQueueDisplay::upNextEntries(const int l
 }
 
 const QImage &DlgQueueDisplay::qrImage(const QString &url) {
-    if (url == m_qrSourceUrl && !m_qrImage.isNull())
+    // A null image is cached too: a URL that failed to encode will fail again, and
+    // retrying on every repaint would log the same warning once a second all night.
+    if (url == m_qrSourceUrl)
         return m_qrImage;
 
     m_qrSourceUrl = url;
@@ -348,10 +350,15 @@ void DlgQueueDisplay::keyPressEvent(QKeyEvent *event) {
         isFullScreen() ? showNormal() : showFullScreen();
         return;
     }
-    if (event->key() == Qt::Key_Escape && isFullScreen()) {
+    if (event->key() == Qt::Key_Escape) {
         // Escape leaves fullscreen rather than closing, so the KJ can't lose the window
-        // off a second screen with one keypress. QDialog would otherwise reject() here.
-        showNormal();
+        // off a second screen with one keypress. When windowed it closes, but through
+        // close() rather than QDialog's reject(), which would hide the window without
+        // a closeEvent and so without saving where it was placed.
+        if (isFullScreen())
+            showNormal();
+        else
+            close();
         return;
     }
     QDialog::keyPressEvent(event);
