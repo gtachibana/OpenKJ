@@ -259,6 +259,8 @@ private:
 
     bool removeQueueSongById(int qsongId);
     void syncQueueModel(int singerId);
+    static int limitParam(const QUrlQuery &query, int fallback, int max);
+    static int historySingerIdFor(const QString &normalizedUsername);
     void normalizeSingerQueuePositions(int singerId);
     bool moveQueueSongByOffset(int qsongId, int offset);
     bool setQueueSongKey(int qsongId, int keyChange);

@@ -1430,8 +1430,8 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiGet(const QString &path, const QUrlQ
     }
     if (path == "/local/songs") {
         const QString q = query.queryItemValue("q");
-        const int limit = std::clamp(query.queryItemValue("limit").toInt(), 1, 500);
-        return jsonResponse(200, commandSearch(QJsonObject{{"searchString", q}, {"limit", limit}}));
+        return jsonResponse(200, commandSearch(QJsonObject{{"searchString", q},
+                                                           {"limit", limitParam(query, 100, 500)}}));
     }
     if (path == "/local/user/me") {
         return jsonResponse(200, currentLocalUser(query));
@@ -1546,7 +1546,21 @@ void OpenKJEmbeddedApi::parseRequestPath(const QString &path, QString &cleanPath
 {
     const QUrl url(path);
     cleanPath = url.path();
-    query = QUrlQuery(url);
+    // QUrlQuery keeps '+' as a literal plus, but browsers form-encode a space as '+'
+    // (URLSearchParams does), which turned every multi-word search into one term. A
+    // real plus arrives as %2B, so it is unaffected.
+    QString rawQuery = url.query(QUrl::FullyEncoded);
+    rawQuery.replace('+', QStringLiteral("%20"));
+    query = QUrlQuery(rawQuery);
+}
+
+// An absent or unparseable limit gets the default. Reading it with a bare toInt() made
+// it 0, which the clamp then turned into a single result.
+int OpenKJEmbeddedApi::limitParam(const QUrlQuery &query, const int fallback, const int max)
+{
+    bool ok = false;
+    const int value = query.queryItemValue("limit").toInt(&ok);
+    return std::clamp(ok ? value : fallback, 1, max);
 }
 
 QByteArray OpenKJEmbeddedApi::jsonResponse(const int statusCode, const QJsonObject &object) const
@@ -1708,45 +1722,34 @@ bool OpenKJEmbeddedApi::moveQueueSongByOffset(const int qsongId, const int offse
 
     const int singerId = find.value(0).toInt();
     const int oldPos = find.value(1).toInt();
-    const int newPos = oldPos + offset;
-    if (newPos < 0) {
-        return false;
-    }
 
-    QSqlQuery countQ;
-    countQ.prepare("SELECT COUNT(1) FROM queuesongs WHERE singer = :singer");
-    countQ.bindValue(":singer", singerId);
-    int count = 0;
-    if (countQ.exec() && countQ.next()) {
-        count = countQ.value(0).toInt();
-    }
-    if (newPos >= count) {
+    // Swapped with the nearest unplayed song rather than the row next door. Played
+    // songs stay in the queue at their old positions, and nobody's phone shows them,
+    // so stepping past one looked like the button did nothing.
+    QSqlQuery neighbour;
+    neighbour.prepare(offset < 0
+            ? "SELECT qsongid, position FROM queuesongs WHERE singer = :singer AND played = 0 "
+              "AND position < :pos ORDER BY position DESC LIMIT 1"
+            : "SELECT qsongid, position FROM queuesongs WHERE singer = :singer AND played = 0 "
+              "AND position > :pos ORDER BY position ASC LIMIT 1");
+    neighbour.bindValue(":singer", singerId);
+    neighbour.bindValue(":pos", oldPos);
+    if (!neighbour.exec() || !neighbour.next()) {
         return false;
     }
+    const int otherId = neighbour.value(0).toInt();
+    const int newPos = neighbour.value(1).toInt();
 
     QSqlQuery tx;
     tx.exec("BEGIN TRANSACTION");
-    if (offset < 0) {
-        QSqlQuery shift;
-        shift.prepare("UPDATE queuesongs SET position = position + 1 WHERE singer = :singer AND position >= :newPos AND position < :oldPos");
-        shift.bindValue(":singer", singerId);
-        shift.bindValue(":newPos", newPos);
-        shift.bindValue(":oldPos", oldPos);
-        shift.exec();
-    } else {
-        QSqlQuery shift;
-        shift.prepare("UPDATE queuesongs SET position = position - 1 WHERE singer = :singer AND position <= :newPos AND position > :oldPos");
-        shift.bindValue(":singer", singerId);
-        shift.bindValue(":newPos", newPos);
-        shift.bindValue(":oldPos", oldPos);
-        shift.exec();
-    }
-
     QSqlQuery upd;
-    upd.prepare("UPDATE queuesongs SET position = :newPos WHERE qsongid = :id");
-    upd.bindValue(":newPos", newPos);
+    upd.prepare("UPDATE queuesongs SET position = :pos WHERE qsongid = :id");
+    upd.bindValue(":pos", newPos);
     upd.bindValue(":id", qsongId);
-    const bool ok = upd.exec();
+    bool ok = upd.exec();
+    upd.bindValue(":pos", oldPos);
+    upd.bindValue(":id", otherId);
+    ok = ok && upd.exec();
     tx.exec(ok ? "COMMIT" : "ROLLBACK");
 
     if (ok) {
@@ -2333,7 +2336,7 @@ QJsonObject OpenKJEmbeddedApi::listUserHistory(const QUrlQuery &query)
         return QJsonObject{{"ok", false}, {"error", "Authentication required"}};
     }
 
-    const int limit = std::clamp(query.queryItemValue("limit").toInt(), 1, 500);
+    const int limit = limitParam(query, 100, 500);
 
     // A local user's rotation singer name is their username (see
     // requestSongFromLocalUser), which is how history rows tie back to them.
@@ -2346,9 +2349,9 @@ QJsonObject OpenKJEmbeddedApi::listUserHistory(const QUrlQuery &query)
                    "JOIN historySingers hsing ON hsing.id = hs.historySinger "
                    "LEFT JOIN dbsongs ds ON ds.path = hs.filepath "
                    "AND ds.discid != '!!DROPPED!!' AND ds.bad = 0 "
-                   "WHERE lower(hsing.name) = :username "
+                   "WHERE hsing.id = :singer "
                    "ORDER BY hs.lastplay DESC LIMIT :limit");
-    select.bindValue(":username", normalized);
+    select.bindValue(":singer", historySingerIdFor(normalized));
     select.bindValue(":limit", limit);
 
     QJsonArray songs;
@@ -2838,20 +2841,34 @@ bool OpenKJEmbeddedApi::migrateLocalUserRows(const QString &currentNormalized, c
     // historySingers.name is UNIQUE, so only do this when the new name isn't
     // already taken - merging two singers' history is not something to do
     // silently behind a profile edit.
-    QSqlQuery historyTaken;
-    historyTaken.prepare("SELECT id FROM historySingers WHERE lower(name) = :name");
-    historyTaken.bindValue(":name", nextNormalized);
-    if (!(historyTaken.exec() && historyTaken.next())) {
+    if (historySingerIdFor(nextNormalized) < 0) {
         QSqlQuery renameHistorySinger;
-        renameHistorySinger.prepare("UPDATE historySingers SET name = :next WHERE lower(name) = :current");
+        renameHistorySinger.prepare("UPDATE historySingers SET name = :next WHERE id = :id");
         renameHistorySinger.bindValue(":next", nextUsername);
-        renameHistorySinger.bindValue(":current", currentNormalized);
+        renameHistorySinger.bindValue(":id", historySingerIdFor(currentNormalized));
         renameHistorySinger.exec();
     }
 
     const bool allOk = userOk && sessionsOk && requestsOk && favoritesOk && songKeysOk;
     tx.exec(allOk ? "COMMIT" : "ROLLBACK");
     return allOk;
+}
+
+// Matched in C++ rather than with SQLite's lower(), which only folds ASCII: usernames
+// are normalized with QString::toLower(), so "Élise" never matched "élise" and her
+// history came back empty.
+int OpenKJEmbeddedApi::historySingerIdFor(const QString &normalizedUsername)
+{
+    QSqlQuery query;
+    if (!query.exec("SELECT id, name FROM historySingers")) {
+        return -1;
+    }
+    while (query.next()) {
+        if (normalizeUsername(query.value(1).toString()) == normalizedUsername) {
+            return query.value(0).toInt();
+        }
+    }
+    return -1;
 }
 
 bool OpenKJEmbeddedApi::localUserExists(const QString &username) const
