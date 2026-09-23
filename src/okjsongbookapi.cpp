@@ -399,6 +399,8 @@ void OKJSongbookAPI::onTestSslErrors(QNetworkReply *reply, QList<QSslError> erro
 
 void OKJSongbookAPI::onNetworkReply(QNetworkReply *reply)
 {
+    // The manager never frees a reply on its own, and this runs for every poll.
+    reply->deleteLater();
     if (m_settings.requestServerIgnoreCertErrors())
         reply->ignoreSslErrors();
     if (reply->error() != QNetworkReply::NoError)
