@@ -37,6 +37,7 @@
 #include "src/models/tableviewtooltipfilter.h"
 #include "dbupdater.h"
 #include "okjutil.h"
+#include "searchfold.h"
 #include <algorithm>
 #include <memory>
 #include "dlgaddsong.h"
@@ -1501,6 +1502,30 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
         query.exec("PRAGMA user_version = 110");
         m_logger->info("{} DB Schema update to v110 completed", m_loggingPrefix);
     }
+    if (schemaVersion < 111) {
+        m_logger->info("{} Updating database schema to version 111", m_loggingPrefix);
+        // Accent-folded, lowercased copies of artist and title for the embedded API's
+        // search and browse. SQLite's LIKE and NOCASE only fold ASCII, so "beyonce"
+        // never found "Beyoncé" and "Édith Piaf" sat under no letter at all. The
+        // folding needs Unicode tables SQLite doesn't have, so it is done in C++ by
+        // okj::refreshSearchFolds() and stored here.
+        query.exec("ALTER TABLE dbsongs ADD COLUMN artistfold TEXT COLLATE NOCASE");
+        query.exec("ALTER TABLE dbsongs ADD COLUMN titlefold TEXT COLLATE NOCASE");
+        // Serves the API's sort and browse, and also the refresh's artistfold IS NULL
+        // lookup, so finding the rows still to fill never scans the library.
+        query.exec("CREATE INDEX IF NOT EXISTS idx_dbsongs_fold ON dbsongs(artistfold, titlefold)");
+        // Every write path that renames a song - rescans, the edit dialog, the name
+        // cleaner, whatever is added later - lands here without having to know the
+        // fold columns exist. Clearing rather than recomputing because SQLite can't
+        // fold; the next refresh fills the row back in.
+        query.exec("CREATE TRIGGER IF NOT EXISTS dbsongs_fold_reset AFTER UPDATE OF artist, title ON dbsongs "
+                   "WHEN NEW.artist IS NOT OLD.artist OR NEW.title IS NOT OLD.title "
+                   "BEGIN UPDATE dbsongs SET artistfold = NULL, titlefold = NULL WHERE songid = NEW.songid; END");
+        query.exec("PRAGMA user_version = 111");
+        m_logger->info("{} DB Schema update to v111 completed", m_loggingPrefix);
+    }
+    if (const int folded = okj::refreshSearchFolds(); folded > 0)
+        m_logger->info("{} Built search folds for {} songs", m_loggingPrefix, folded);
 }
 
 

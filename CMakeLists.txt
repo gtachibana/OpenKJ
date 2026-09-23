@@ -489,6 +489,7 @@ set(SOURCE_FILES
         src/durationlazyupdater.cpp
         src/gainlazyupdater.cpp
         src/youtubefetcher.cpp
+        src/searchfold.cpp
         src/dlgyoutubecache.cpp
         src/idledetect.cpp
         src/mainwindow.h
@@ -561,6 +562,7 @@ set(SOURCE_FILES
         src/durationlazyupdater.h
         src/gainlazyupdater.h
         src/youtubefetcher.h
+        src/searchfold.h
         src/dlgyoutubecache.h
         src/idledetect.h
         src/mainwindow.ui
