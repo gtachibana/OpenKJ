@@ -978,7 +978,10 @@ QJsonObject OpenKJEmbeddedApi::handleApiCommand(const QJsonObject &payload)
 
     if (command == "clearRequests") {
         QSqlQuery query;
+        query.exec("DELETE FROM local_request_owners WHERE request_id IN "
+                   "(SELECT qsongid FROM queuesongs WHERE played = 0)");
         query.exec("DELETE FROM queuesongs WHERE played = 0");
+        syncQueueModel(-1);
         nextSerial();
 
         QJsonObject out;
@@ -1383,22 +1386,18 @@ QJsonObject OpenKJEmbeddedApi::commandAdminAction(const QJsonObject &payload)
             query.prepare("SELECT qsongid FROM queuesongs WHERE singer = :singer AND played = 0 ORDER BY position LIMIT 1");
             query.bindValue(":singer", singerId);
             if (query.exec() && query.next()) {
-                QSqlQuery upd;
-                upd.prepare("UPDATE queuesongs SET played = 1 WHERE qsongid = :id");
-                upd.bindValue(":id", query.value(0).toInt());
-                success = upd.exec();
+                // The model's own setter, for the same reason as setQueueSongKey().
+                m_queueModel.setPlayed(query.value(0).toInt());
+                success = true;
             }
         }
-    } else if (action == "rotation_next") {
-        const int nextId = nextSingerId(1);
-        if (nextId >= 0) {
-            m_settings.setCurrentRotationPosition(nextId);
-            success = true;
-        }
-    } else if (action == "rotation_previous") {
-        const int prevId = nextSingerId(-1);
-        if (prevId >= 0) {
-            m_settings.setCurrentRotationPosition(prevId);
+    } else if (action == "rotation_next" || action == "rotation_previous") {
+        // Through the model, not the setting: the model only reads the setting at
+        // startup, so writing it alone moved the phones' idea of who is up while the
+        // desktop and the autoplay advance carried on from the old singer.
+        const int id = nextSingerId(action == "rotation_next" ? 1 : -1);
+        if (id >= 0) {
+            m_rotationModel.setCurrentSinger(id);
             success = true;
         }
     } else if (action == "set_volume") {
@@ -1652,12 +1651,24 @@ bool OpenKJEmbeddedApi::removeQueueSongById(const int qsongId)
 
     if (removed && singerId >= 0) {
         normalizeSingerQueuePositions(singerId);
-        if (m_queueModel.getSingerId() == singerId) {
-            m_queueModel.loadSinger(singerId);
-        }
+        syncQueueModel(singerId);
     }
 
     return removed;
+}
+
+// Everything here that writes queuesongs directly has to come back through this.
+// TableModelQueueSongs::commitChanges() rewrites the loaded singer's rows from memory
+// on the KJ's next drag, remove or sort, so a row changed underneath a stale model is
+// quietly put back the way it was. The signal is what redraws the rotation's next-song
+// column and pushes a snapshot to the phones.
+void OpenKJEmbeddedApi::syncQueueModel(const int singerId)
+{
+    const int loaded = m_queueModel.getSingerId();
+    if (loaded >= 0 && (singerId < 0 || singerId == loaded)) {
+        m_queueModel.loadSinger(loaded);
+    }
+    emit m_queueModel.queueModified(singerId < 0 ? loaded : singerId);
 }
 
 void OpenKJEmbeddedApi::normalizeSingerQueuePositions(const int singerId)
@@ -1738,19 +1749,20 @@ bool OpenKJEmbeddedApi::moveQueueSongByOffset(const int qsongId, const int offse
     const bool ok = upd.exec();
     tx.exec(ok ? "COMMIT" : "ROLLBACK");
 
-    if (ok && m_queueModel.getSingerId() == singerId) {
-        m_queueModel.loadSinger(singerId);
+    if (ok) {
+        syncQueueModel(singerId);
     }
     return ok;
 }
 
 bool OpenKJEmbeddedApi::setQueueSongKey(const int qsongId, const int keyChange)
 {
-    QSqlQuery query;
-    query.prepare("UPDATE queuesongs SET keychg = :key WHERE qsongid = :id");
-    query.bindValue(":key", std::clamp(keyChange, -12, 12));
-    query.bindValue(":id", qsongId);
-    return query.exec();
+    // Through the model rather than raw SQL: it writes the row and, when that singer
+    // is loaded, the in-memory copy that commitChanges() would otherwise write back
+    // over it. No reload - this runs on every mid-song key nudge, and a reload would
+    // drop the KJ's selection in the queue view each time.
+    m_queueModel.setKey(qsongId, std::clamp(keyChange, -12, 12));
+    return true;
 }
 
 int OpenKJEmbeddedApi::currentSingerId() const
@@ -1760,28 +1772,16 @@ int OpenKJEmbeddedApi::currentSingerId() const
 
 int OpenKJEmbeddedApi::nextSingerId(const int direction) const
 {
-    QSqlQuery query;
-    query.exec("SELECT singerid, position FROM rotationsingers ORDER BY position ASC");
-
-    QList<QPair<int, int>> singers;
-    while (query.next()) {
-        singers.append({query.value(0).toInt(), query.value(1).toInt()});
-    }
-    if (singers.isEmpty()) {
+    const int count = static_cast<int>(m_rotationModel.singerCount());
+    if (count == 0) {
         return -1;
     }
 
-    const int curId = currentSingerId();
-    int idx = 0;
-    for (int i = 0; i < singers.size(); ++i) {
-        if (singers.at(i).first == curId) {
-            idx = i;
-            break;
-        }
-    }
-
-    const int nextIdx = (idx + direction + singers.size()) % singers.size();
-    return singers.at(nextIdx).first;
+    // With nobody current, "next" is the top of the rotation and "previous" the bottom.
+    const auto &current = m_rotationModel.getSinger(m_rotationModel.currentSinger());
+    const int from = current.isValid() ? current.position : (direction > 0 ? -1 : 0);
+    const int to = ((from + direction) % count + count) % count;
+    return m_rotationModel.getSingerAtPosition(to).id;
 }
 
 QJsonObject OpenKJEmbeddedApi::buildQueueResponse()

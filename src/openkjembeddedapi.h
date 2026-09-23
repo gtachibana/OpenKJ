@@ -258,6 +258,7 @@ private:
     QJsonObject commandAdminAction(const QJsonObject &payload);
 
     bool removeQueueSongById(int qsongId);
+    void syncQueueModel(int singerId);
     void normalizeSingerQueuePositions(int singerId);
     bool moveQueueSongByOffset(int qsongId, int offset);
     bool setQueueSongKey(int qsongId, int keyChange);
