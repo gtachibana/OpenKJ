@@ -261,6 +261,8 @@ void MainWindow::setupShortcuts() {
         m_curArtist = nextSinger.nextSongArtist();
         m_curTitle = nextSinger.nextSongTitle();
 
+        if (!play(nextSongPath))
+            return;
         if (m_settings.treatAllSingersAsRegs() || nextSinger.regular) {
             m_historySongsModel.saveSong(
                     nextSinger.name,
@@ -272,7 +274,6 @@ void MainWindow::setupShortcuts() {
             );
         }
         m_karaokeSongsModel.updateSongHistory(m_karaokeSongsModel.getIdForPath(nextSongPath));
-        play(nextSongPath);
         m_mediaBackendKar.setPitchShift(nextSinger.nextSongKeyChg());
         m_qModel.setPlayed(nextSinger.nextSongQueueId());
         m_rotModel.setCurrentSinger(nextSinger.id);
@@ -1503,7 +1504,7 @@ void MainWindow::dbInit(const QDir &okjDataDir) {
 }
 
 
-void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
+bool MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
     // Covers every entry point at once, including the KJ double-clicking a singer,
     // which never goes through the rotation search. Without it the media backend
     // reports the missing file as end-of-media the instant it starts (see
@@ -1515,7 +1516,14 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
         QMessageBox::warning(this, tr("Song not ready yet"),
                              tr("This song was requested from YouTube and is still downloading.\n\n"
                                 "It will play once the download finishes."), QMessageBox::Ok);
-        return;
+        return false;
+    }
+    // Whatever started this song, it supersedes a pending autoplay countdown. Left
+    // running, the countdown would fire mid-song and replace this one with the singer
+    // it had picked before the KJ stepped in.
+    if (m_timerKaraokeAA.isActive()) {
+        m_timerKaraokeAA.stop();
+        cdgWindow->showAlert(false);
     }
     m_mediaTempDir = std::make_unique<QTemporaryDir>();
     // Levels this track against the rest of the library. Songs the gain updater hasn't
@@ -1542,13 +1550,13 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
                         m_timerTest.stop();
                         QMessageBox::warning(this, tr("Bad karaoke file"), tr("Failed to extract audio file."),
                                              QMessageBox::Ok);
-                        return;
+                        return false;
                     }
                     if (!archive.extractCdg(m_mediaTempDir->path(), "tmp.cdg")) {
                         m_timerTest.stop();
                         QMessageBox::warning(this, tr("Bad karaoke file"), tr("Failed to extract CDG file."),
                                              QMessageBox::Ok);
-                        return;
+                        return false;
                     }
                     QString audioFile = m_mediaTempDir->path() + QDir::separator() + "tmp" + archive.audioExtension();
                     QString cdgFile = m_mediaTempDir->path() + QDir::separator() + "tmp.cdg";
@@ -1568,30 +1576,30 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
                 QMessageBox::warning(this, tr("Bad karaoke file"),
                                      tr("Zip file does not contain a valid karaoke track.  CDG or audio file missing or corrupt."),
                                      QMessageBox::Ok);
-                return;
+                return false;
             }
         } else if (karaokeFilePath.endsWith(".cdg", Qt::CaseInsensitive)) {
             QFile cdgFile(karaokeFilePath);
             if (!cdgFile.exists()) {
                 m_timerTest.stop();
                 QMessageBox::warning(this, tr("Bad karaoke file"), tr("CDG file missing."), QMessageBox::Ok);
-                return;
+                return false;
             } else if (cdgFile.size() == 0) {
                 m_timerTest.stop();
                 QMessageBox::warning(this, tr("Bad karaoke file"), tr("CDG file contains no data"), QMessageBox::Ok);
-                return;
+                return false;
             }
             QString audioFilename = findMatchingAudioFile(karaokeFilePath);
             if (audioFilename == "") {
                 m_timerTest.stop();
                 QMessageBox::warning(this, tr("Bad karaoke file"), tr("Audio file missing."), QMessageBox::Ok);
-                return;
+                return false;
             }
             QFile audioFile(audioFilename);
             if (audioFile.size() == 0) {
                 m_timerTest.stop();
                 QMessageBox::warning(this, tr("Bad karaoke file"), tr("Audio file contains no data"), QMessageBox::Ok);
-                return;
+                return false;
             }
             // The CDG is read into memory by CdgFileReader via QFile, so it can always be played
             // from its original location. The audio path is handed to GStreamer, which can't
@@ -1607,7 +1615,7 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
                     m_timerTest.stop();
                     QMessageBox::warning(this, tr("Bad karaoke file"),
                                          tr("Failed to prepare the audio file for playback."), QMessageBox::Ok);
-                    return;
+                    return false;
                 }
                 audioSource = tmpAudio;
             }
@@ -1631,7 +1639,7 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
                     m_timerTest.stop();
                     QMessageBox::warning(this, tr("Bad karaoke file"),
                                          tr("Failed to prepare the video file for playback."), QMessageBox::Ok);
-                    return;
+                    return false;
                 }
                 videoSource = tmpFilePath;
             }
@@ -1658,6 +1666,7 @@ void MainWindow::play(const QString &karaokeFilePath, const bool &k2k) {
     m_k2kTransition = false;
     if (m_settings.karaokeAutoAdvance())
         m_kAASkip = false;
+    return true;
 }
 
 MainWindow::~MainWindow() {
@@ -1893,8 +1902,9 @@ void MainWindow::tableViewRotationDoubleClicked(const QModelIndex &index) {
             QString curSongId = singer.nextSongSongId();
             int curKeyChange = singer.nextSongKeyChg();
 
+            if (!play(nextSongPath, m_k2kTransition))
+                return;
             m_karaokeSongsModel.updateSongHistory(m_karaokeSongsModel.getIdForPath(nextSongPath));
-            play(nextSongPath, m_k2kTransition);
             ui->labelArtist->setText(m_curArtist);
             ui->labelTitle->setText(m_curTitle);
             ui->labelSinger->setText(m_curSinger);
@@ -2023,11 +2033,12 @@ void MainWindow::tableViewQueueDoubleClicked(const QModelIndex &index) {
     m_curSinger = singer.name;
     m_curArtist = song.artist;
     m_curTitle = song.title;
+    if (!play(song.path, m_k2kTransition))
+        return;
     ui->labelSinger->setText(singer.name);
     ui->labelArtist->setText(song.artist);
     ui->labelTitle->setText(song.title);
     m_karaokeSongsModel.updateSongHistory(song.dbSongId);
-    play(song.path, m_k2kTransition);
     if (m_settings.treatAllSingersAsRegs() || singer.regular)
         m_historySongsModel.saveSong(singer.name, song.path, song.artist, song.title, song.songId, song.keyChange);
     m_mediaBackendKar.setPitchShift(song.keyChange);
@@ -3225,29 +3236,40 @@ void MainWindow::karaokeAATimerTimeout() {
         m_logger->info("{} KaraokeAA - Aborted via stop button", m_loggingPrefix);
         m_kAASkip = false;
     } else {
-        auto &singer = m_rotModel.getSinger(m_kAANextSinger);
+        // Everything is read fresh rather than trusting what was picked when the
+        // countdown started. The singer can reorder or remove their next song from their
+        // phone in the meantime - the up-next alert invites exactly that - and the path
+        // saved back then would play a song they took out, or play one song while
+        // marking another as sung.
+        const okj::RotationSinger singer = m_rotModel.getSinger(m_kAANextSinger);
+        const QString songPath = (singer.isValid() && !singer.paused) ? singer.nextSongPath() : QString();
+        if (!songPathIsPlayable(songPath)) {
+            m_logger->info("{} KaraokeAA - {} no longer has a playable next song, picking again", m_loggingPrefix,
+                           singer.name.toStdString());
+            startAutoPlayIfIdle();
+            return;
+        }
+        if (songPath != m_kAANextSongPath)
+            m_logger->info("{} KaraokeAA - {}'s next song changed during the countdown, playing: {}",
+                           m_loggingPrefix, singer.name.toStdString(), songPath.toStdString());
+        const int queueSongId = singer.nextSongQueueId();
+        const int keyChange = singer.nextSongKeyChg();
+        const QString songId = singer.nextSongSongId();
         m_curSinger = singer.name;
         m_curArtist = singer.nextSongArtist();
         m_curTitle = singer.nextSongTitle();
+        if (!play(songPath))
+            return;
         ui->labelArtist->setText(m_curArtist);
         ui->labelTitle->setText(m_curTitle);
         ui->labelSinger->setText(m_curSinger);
-        if (m_settings.treatAllSingersAsRegs() || m_rotModel.getSinger(m_kAANextSinger).regular) {
-            m_historySongsModel.saveSong(
-                    m_curSinger,
-                    m_kAANextSongPath,
-                    m_curArtist,
-                    m_curTitle,
-                    singer.nextSongSongId(),
-                    singer.nextSongKeyChg()
-            );
-        }
-        m_karaokeSongsModel.updateSongHistory(m_karaokeSongsModel.getIdForPath(m_kAANextSongPath));
-        play(m_kAANextSongPath);
-        m_mediaBackendKar.setPitchShift(singer.nextSongKeyChg());
-        m_qModel.setPlayed(singer.nextSongQueueId());
-        m_rotModel.setCurrentSinger(m_kAANextSinger);
-        m_rotDelegate.setCurrentSinger(m_kAANextSinger);
+        if (m_settings.treatAllSingersAsRegs() || singer.regular)
+            m_historySongsModel.saveSong(m_curSinger, songPath, m_curArtist, m_curTitle, songId, keyChange);
+        m_karaokeSongsModel.updateSongHistory(m_karaokeSongsModel.getIdForPath(songPath));
+        m_mediaBackendKar.setPitchShift(keyChange);
+        m_qModel.setPlayed(queueSongId);
+        m_rotModel.setCurrentSinger(singer.id);
+        m_rotDelegate.setCurrentSinger(singer.id);
         if (m_settings.rotationAltSortOrder()) {
             m_curSingerOriginalPosition = singer.position;
             if (singer.position != 0)
@@ -4848,8 +4870,9 @@ void MainWindow::buttonHistoryPlayClicked() {
     ui->labelSinger->setText(m_curSinger);
     ui->labelArtist->setText(m_curArtist);
     ui->labelTitle->setText(m_curTitle);
+    if (!play(filePath, m_k2kTransition))
+        return;
     m_karaokeSongsModel.updateSongHistory(m_karaokeSongsModel.getIdForPath(filePath));
-    play(filePath, m_k2kTransition);
     if (m_settings.treatAllSingersAsRegs() || m_rotModel.getSinger(curSingerId).regular)
         m_historySongsModel.saveSong(m_curSinger, filePath, m_curArtist, m_curTitle, curSongId, curKeyChange);
     m_mediaBackendKar.setPitchShift(curKeyChange);

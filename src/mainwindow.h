@@ -216,7 +216,8 @@ private:
     void setupConnections();
     void loadSettings();
     void resetBmLabels();
-    void play(const QString &karaokeFilePath, const bool &k2k = false);
+    // False when the song could not be started; the caller must not mark it played.
+    bool play(const QString &karaokeFilePath, const bool &k2k = false);
     void bmAddPlaylist(const QString& title);
     bool bmPlaylistExists(const QString& name);
     void addSfxButton(const QString &filename, const QString &label, bool reset = false);
