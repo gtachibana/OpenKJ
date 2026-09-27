@@ -360,6 +360,10 @@ public:
     // KJ hasn't set one, and the display leaves the whole panel out.
     QString requestSiteUrl();
     void setRequestSiteUrl(const QString &url);
+    // Whether the singer window puts that address and its QR code in a corner while
+    // nothing is playing. Off by default, and nothing is drawn while the URL is empty.
+    bool cdgShowRequestQr();
+    void setCdgShowRequestQr(bool show);
     bool bmKCrossFade();
     bool requestRemoveOnRotAdd();
     bool requestDialogAutoShow();

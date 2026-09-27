@@ -203,6 +203,7 @@ public slots:
     void setNextSong(const QString &song);
     void setCountdownSecs(int seconds);
     void applyBackgroundImageMode();
+    void applyRequestQr();
     void timerSlideShowTimeout();
     void alertFontChanged(const QFont &font);
     void mouseMove(QMouseEvent *event);

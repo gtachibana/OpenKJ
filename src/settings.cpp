@@ -1953,6 +1953,16 @@ void Settings::setRequestSiteUrl(const QString &url)
     settings->setValue("requestSiteUrl", url.trimmed());
 }
 
+bool Settings::cdgShowRequestQr()
+{
+    return settings->value("cdgShowRequestQr", false).toBool();
+}
+
+void Settings::setCdgShowRequestQr(bool show)
+{
+    settings->setValue("cdgShowRequestQr", show);
+}
+
 bool Settings::bmKCrossFade()
 {
     return settings->value("bmKCrossFade", true).toBool();

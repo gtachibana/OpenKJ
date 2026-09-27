@@ -83,6 +83,7 @@ DlgCdg::DlgCdg(MediaBackend &KaraokeBackend, MediaBackend &BreakBackend, QWidget
     m_tWidget->setTextColor(m_settings.cdgRemainTextColor());
     m_tWidget->setBackgroundColor(m_settings.cdgRemainBgColor());
     applyBackgroundImageMode();
+    applyRequestQr();
     showAlert(false);
     alertFontChanged(m_settings.karaokeAAAlertFont());
     alertBgColorChanged(m_settings.alertBgColor());
@@ -295,6 +296,12 @@ void DlgCdg::alertTxtColorChanged(const QColor &color)
     auto palette = ui->widgetAlert->palette();
     palette.setColor(ui->widgetAlert->foregroundRole(), color);
     ui->widgetAlert->setPalette(palette);
+}
+
+void DlgCdg::applyRequestQr()
+{
+    // Only on the karaoke display: that is the one showing between singers.
+    ui->videoDisplayKar->setRequestUrl(m_settings.cdgShowRequestQr() ? m_settings.requestSiteUrl() : QString());
 }
 
 void DlgCdg::applyBackgroundImageMode()

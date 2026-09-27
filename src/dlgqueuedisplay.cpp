@@ -27,10 +27,9 @@
 #include <QPainter>
 #include <QRegularExpression>
 #include <algorithm>
-#include <stdexcept>
 #include <spdlog/spdlog.h>
 
-#include "3rdparty/qrcodegen/qrcodegen.hpp"
+#include "qrimage.h"
 #include "models/tablemodelrotation.h"
 
 namespace {
@@ -43,10 +42,6 @@ namespace {
     const QColor kPrimaryText{240, 240, 245};
     const QColor kSecondaryText{165, 165, 180};
     const QColor kDimText{120, 120, 135};
-
-    // Enough of a quiet zone for a phone camera to lock on; the spec asks for four
-    // modules and this is what the panel's white card is sized around.
-    constexpr int kQrQuietModules = 4;
 
     QString elide(const QFontMetrics &metrics, const QString &text, const int width) {
         return metrics.elidedText(text, Qt::ElideRight, width);
@@ -154,27 +149,7 @@ const QImage &DlgQueueDisplay::qrImage(const QString &url) {
         return m_qrImage;
 
     m_qrSourceUrl = url;
-    m_qrImage = QImage();
-    try {
-        // MEDIUM rather than LOW: the code is photographed off a screen from across a
-        // bar, at an angle, through a phone camera that is doing its best.
-        const auto qr = qrcodegen::QrCode::encodeText(url.toUtf8().constData(), qrcodegen::QrCode::Ecc::MEDIUM);
-        const int modules = qr.getSize();
-        const int side = modules + (kQrQuietModules * 2);
-        QImage image(side, side, QImage::Format_RGB32);
-        image.fill(Qt::white);
-        for (int y = 0; y < modules; y++) {
-            for (int x = 0; x < modules; x++) {
-                if (qr.getModule(x, y))
-                    image.setPixel(x + kQrQuietModules, y + kQrQuietModules, qRgb(0, 0, 0));
-            }
-        }
-        m_qrImage = image;
-    } catch (const std::exception &e) {
-        // Only reachable if the address is longer than a QR code can hold, which means
-        // it is not an address anyone is going to type either. Drawn as text-only.
-        m_logger->warn("{} Could not encode request site URL as a QR code: {}", m_loggingPrefix, e.what());
-    }
+    m_qrImage = makeQrImage(url);
     return m_qrImage;
 }
 

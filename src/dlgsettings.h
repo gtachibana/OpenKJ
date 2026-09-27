@@ -65,6 +65,7 @@ private:
     QGroupBox *m_groupBoxLocalMode{nullptr};
     QLineEdit *m_lineEditLocalUiUrl{nullptr};
     QLineEdit *m_lineEditRequestSiteUrl{nullptr};
+    QCheckBox *m_checkBoxShowRequestQr{nullptr};
     QLineEdit *m_lineEditEmbeddedBindAddress{nullptr};
     QSpinBox *m_spinBoxEmbeddedPort{nullptr};
     QSpinBox *m_spinBoxUpNextTurns{nullptr};
@@ -95,6 +96,7 @@ private:
     void setupHotkeysForm();
     void makeTabsScrollable();
     void clampToScreen();
+    void setupRequestQrWidget();
     void ignoreWheelUnlessFocused();
     struct KeyboardShortcut
     {
@@ -126,6 +128,7 @@ signals:
     void bgModeChanged(Settings::BgMode mode);
     void bgSlideShowDirChanged(QString dir);
     void cdgBgImageChanged();
+    void requestQrChanged();
     void cdgOffsetsChanged();
     void cdgRemainBgColorChanged(QColor color);
     void cdgRemainEnabledChanged(bool enabled);

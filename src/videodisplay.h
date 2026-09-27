@@ -4,6 +4,8 @@
 #include <QWidget>
 #include <QBoxLayout>
 #include <QResizeEvent>
+#include <QImage>
+#include <QPainter>
 
 class VideoDisplay : public QWidget
 {
@@ -14,6 +16,9 @@ private:
     bool m_hasActiveVideo { false };
     bool m_fillOnPaint { false };
     bool m_repaintBackgroundOnce { false };
+    QString m_requestUrl;
+    QImage m_requestQr;
+    void paintRequestPanel(QPainter &painter);
 
 public:
     explicit VideoDisplay(QWidget *parent = nullptr);
@@ -26,6 +31,8 @@ public slots:
     void setBackground(const QPixmap &pixmap);
     void useDefaultBackground();
     void setHasActiveVideo(const bool &value);
+    // The request site address to show with its QR code while stopped, or empty for none.
+    void setRequestUrl(const QString &url);
 
     /**
      * @brief Fill with black on paint event when video is playing.

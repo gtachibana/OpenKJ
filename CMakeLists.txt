@@ -468,6 +468,7 @@ set(SOURCE_FILES
         src/tickernew.cpp
         src/updatechecker.cpp
         src/videodisplay.cpp
+        src/qrimage.cpp
         src/volslider.cpp
         src/dlgaddsinger.cpp
         src/songshop.cpp
@@ -539,6 +540,7 @@ set(SOURCE_FILES
         src/tickernew.h
         src/updatechecker.h
         src/videodisplay.h
+        src/qrimage.h
         src/volslider.h
         src/okjversion.h
         src/dlgaddsinger.h
