@@ -2156,6 +2156,7 @@ void MainWindow::actionSettingsTriggered() {
     connect(settingsDialog, &DlgSettings::bgModeChanged, cdgWindow.get(), &DlgCdg::applyBackgroundImageMode);
     connect(settingsDialog, &DlgSettings::bgSlideShowDirChanged, cdgWindow.get(), &DlgCdg::applyBackgroundImageMode);
     connect(settingsDialog, &DlgSettings::cdgBgImageChanged, cdgWindow.get(), &DlgCdg::applyBackgroundImageMode);
+    connect(settingsDialog, &DlgSettings::requestQrChanged, cdgWindow.get(), &DlgCdg::applyRequestQr);
     connect(settingsDialog, &DlgSettings::cdgOffsetsChanged, cdgWindow.get(), &DlgCdg::cdgOffsetsChanged);
     connect(settingsDialog, &DlgSettings::cdgRemainBgColorChanged, cdgWindow->durationWidget(), &TransparentWidget::setBackgroundColor);
     connect(settingsDialog, &DlgSettings::cdgRemainEnabledChanged, cdgWindow->durationWidget(), &TransparentWidget::setVisible);

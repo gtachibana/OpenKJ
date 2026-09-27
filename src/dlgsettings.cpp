@@ -131,6 +131,7 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     connect(ui->comboBoxFileLogLevel, qOverload<int>(&QComboBox::currentIndexChanged), this, &DlgSettings::comboBoxFileLogLevelChanged);
     ui->tabWidgetMain->setCurrentIndex(0);
     setupModeWidgets();
+    setupRequestQrWidget();
     ui->checkBoxDbSkipValidation->setChecked(m_settings.dbSkipValidation());
     ui->checkBoxLazyLoadDurations->setChecked(m_settings.dbLazyLoadDurations());
     ui->checkBoxMonitorDirs->setChecked(m_settings.dbDirectoryWatchEnabled());
@@ -525,9 +526,29 @@ void DlgSettings::setupModeWidgets()
 
     connect(m_lineEditRequestSiteUrl, &QLineEdit::editingFinished, this, [&]() {
         m_settings.setRequestSiteUrl(m_lineEditRequestSiteUrl->text().trimmed());
+        emit requestQrChanged();
     });
 
     setupYoutubeWidgets(networkLayout);
+}
+
+void DlgSettings::setupRequestQrWidget()
+{
+    // Sits with the background settings on the Video tab, since it draws over that
+    // background, but shares the address the queue display uses.
+    m_checkBoxShowRequestQr = new QCheckBox(tr("Show request site QR code when nothing is playing"));
+    m_checkBoxShowRequestQr->setChecked(m_settings.cdgShowRequestQr());
+    m_checkBoxShowRequestQr->setToolTip(
+            tr("Puts the request site address and a QR code for it in the corner of the singer
+"
+               "window between songs. Uses the Request site URL on the Modes & Network tab, and
+"
+               "shows nothing while that is empty."));
+    ui->verticalLayout_12->addWidget(m_checkBoxShowRequestQr);
+    connect(m_checkBoxShowRequestQr, &QCheckBox::toggled, this, [&](bool checked) {
+        m_settings.setCdgShowRequestQr(checked);
+        emit requestQrChanged();
+    });
 }
 
 void DlgSettings::setupYoutubeWidgets(QVBoxLayout *networkLayout)
