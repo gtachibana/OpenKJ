@@ -95,6 +95,7 @@ private:
     void setupHotkeysForm();
     void makeTabsScrollable();
     void clampToScreen();
+    void ignoreWheelUnlessFocused();
     struct KeyboardShortcut
     {
         QString description;
@@ -229,6 +230,7 @@ private slots:
     // QWidget interface
 protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
     // QDialog interface
 public slots:
