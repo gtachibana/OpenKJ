@@ -39,6 +39,8 @@
 #include <QAuthenticator>
 #include <QKeySequenceEdit>
 #include <QScrollArea>
+#include <QAbstractSpinBox>
+#include <QSlider>
 #include "audiorecorder.h"
 #include "dlgyoutubecache.h"
 #include <QScreen>
@@ -336,6 +338,7 @@ DlgSettings::DlgSettings(MediaBackend &AudioBackend, MediaBackend &BmAudioBacken
     setupHotkeysForm();
     refreshNetworkModeUi();
     makeTabsScrollable();
+    ignoreWheelUnlessFocused();
     if (!restoredGeometry) {
         adjustSize();
         resize(size().expandedTo(designedSize));
@@ -371,6 +374,39 @@ void DlgSettings::makeTabsScrollable() {
         host->setContentsMargins(0, 0, 0, 0);
         host->addWidget(scrollArea);
     }
+}
+
+void DlgSettings::ignoreWheelUnlessFocused() {
+    // Every page scrolls, so the wheel is usually meant for the page - but a spin
+    // box, combo box or slider that drifts under the pointer on the way down would
+    // otherwise take the wheel and quietly change a setting. They only answer the
+    // wheel once clicked or tabbed into; until then it passes on to the page.
+    QList<QWidget *> controls;
+    for (auto *w : findChildren<QAbstractSpinBox *>())
+        controls << w;
+    for (auto *w : findChildren<QComboBox *>())
+        controls << w;
+    for (auto *w : findChildren<QSlider *>())
+        controls << w;
+    for (auto *control : controls) {
+        // The default for spin boxes and sliders is WheelFocus, which would hand
+        // them focus - and with it the wheel - the moment the pointer rolled over.
+        control->setFocusPolicy(Qt::StrongFocus);
+        control->installEventFilter(this);
+    }
+}
+
+bool DlgSettings::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::Wheel) {
+        auto *control = qobject_cast<QWidget *>(watched);
+        if (control != nullptr && !control->hasFocus()) {
+            // Ignored and filtered: the control never sees it, and QApplication
+            // carries on offering it to the parents, where the scroll area takes it.
+            event->ignore();
+            return true;
+        }
+    }
+    return QDialog::eventFilter(watched, event);
 }
 
 void DlgSettings::clampToScreen() {
