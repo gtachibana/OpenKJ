@@ -539,10 +539,8 @@ void DlgSettings::setupRequestQrWidget()
     m_checkBoxShowRequestQr = new QCheckBox(tr("Show request site QR code when nothing is playing"));
     m_checkBoxShowRequestQr->setChecked(m_settings.cdgShowRequestQr());
     m_checkBoxShowRequestQr->setToolTip(
-            tr("Puts the request site address and a QR code for it in the corner of the singer
-"
-               "window between songs. Uses the Request site URL on the Modes & Network tab, and
-"
+            tr("Puts the request site address and a QR code for it in the corner of the singer "
+               "window between songs. Uses the Request site URL on the Modes & Network tab, and "
                "shows nothing while that is empty."));
     ui->verticalLayout_12->addWidget(m_checkBoxShowRequestQr);
     connect(m_checkBoxShowRequestQr, &QCheckBox::toggled, this, [&](bool checked) {

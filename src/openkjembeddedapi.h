@@ -141,6 +141,10 @@ private:
     // keeps getting a full snapshot on every tick, which is what the wire looked
     // like before deltas existed.
     QSet<QTcpSocket *> m_sseDeltaClients;
+    // Sockets sending a song file, and where each one's bytes come from - the file
+    // itself, or an in-memory zip for an MP3+CDG pair. The source is parented to the
+    // socket so it goes away with it, however the transfer ends.
+    QHash<QTcpSocket *, QIODevice *> m_downloads;
     QTimer m_sseBroadcastTimer;
     QTimer m_sseRefreshTimer;
     QTimer m_idleSweepTimer;
@@ -186,6 +190,15 @@ private:
     void sweepIdleConnections();
 
     void beginEventStream(QTcpSocket *socket, const QUrlQuery &query);
+    // Sends one library song to the KJ's own device, so a phone or tablet player can
+    // carry a copy of the library. Admin-only: anyone else on the network could
+    // otherwise walk off with every file. Handled outside handleRequest() because a
+    // video runs to hundreds of megabytes, which cannot be built up as one response
+    // the way every JSON reply is.
+    void beginSongDownload(QTcpSocket *socket, const QUrlQuery &query);
+    // Tops up the socket's write buffer from the download source, a chunk at a time,
+    // so a whole file is never held in memory. Driven by bytesWritten.
+    void pumpDownload(QTcpSocket *socket);
     void scheduleSseBroadcast();
     void broadcastSseSnapshot();
     // Hash of everything in a snapshot except the values that move on their own.
@@ -237,6 +250,9 @@ private:
     void setAccepting(bool accepting);
 
     QJsonObject commandSearch(const QJsonObject &payload);
+    // The KJ's view of the catalog, for copying songs onto another player: unlike the
+    // singer search it keeps vocal versions and says what kind of file each song is.
+    QJsonObject listLibraryForAdmin(const QUrlQuery &query);
     // singerName picks the queue the song lands in, and on the legacy surface it
     // arrives with no credentials at all, so who the caller is has to come in
     // alongside it. authorizedUser is the normalized account the caller has proved
