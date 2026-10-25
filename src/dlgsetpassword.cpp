@@ -25,8 +25,16 @@ void DlgSetPassword::on_pushButtonClose_clicked()
 
 void DlgSetPassword::on_pushButtonOk_clicked()
 {
-    if (ui->lineEditPassword1->text() != ui->lineEditPassword2->text())
+    // It doubles as the admin login for the embedded API, which anyone on the network
+    // can reach, so an empty one is not allowed.
+    if (ui->lineEditPassword1->text().isEmpty())
     {
+        ui->labelPasswordMismatch->setText(tr("Password can't be empty!"));
+        ui->labelPasswordMismatch->show();
+    }
+    else if (ui->lineEditPassword1->text() != ui->lineEditPassword2->text())
+    {
+        ui->labelPasswordMismatch->setText(tr("Passwords didn't match!"));
         ui->labelPasswordMismatch->show();
     }
     else

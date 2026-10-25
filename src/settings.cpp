@@ -265,6 +265,21 @@ bool Settings::passIsSet()
     return false;
 }
 
+void Settings::changePassword(const QString &oldPassword, const QString &newPassword)
+{
+    // The password is also the key the saved card and Karaoke.net login are encrypted
+    // with, so they are decrypted with the old one and written back with the new one -
+    // otherwise they would quietly turn to garbage.
+    SimpleCrypt oldCrypt(this->hash(oldPassword));
+    SimpleCrypt newCrypt(this->hash(newPassword));
+    for (const char *key : {"cc", "karaokeDotNetUser", "karaokeDotNetPass"}) {
+        const QString encrypted = settings->value(key, QString()).toString();
+        if (!encrypted.isEmpty())
+            settings->setValue(key, newCrypt.encryptToString(oldCrypt.decryptToString(encrypted)));
+    }
+    setPassword(newPassword);
+}
+
 void Settings::setCC(QString ccn, QString month, QString year, QString ccv, QString passwd)
 {
     QString cc = ccn + "," + month + "," + year + "," + ccv;

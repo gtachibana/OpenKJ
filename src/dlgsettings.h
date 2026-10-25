@@ -69,6 +69,7 @@ private:
     QLineEdit *m_lineEditEmbeddedBindAddress{nullptr};
     QSpinBox *m_spinBoxEmbeddedPort{nullptr};
     QSpinBox *m_spinBoxUpNextTurns{nullptr};
+    QPushButton *m_buttonAdminPassword{nullptr};
     QGroupBox *m_groupBoxYoutube{nullptr};
     QLineEdit *m_lineEditDlpPath{nullptr};
     QLabel *m_labelDlpStatus{nullptr};
@@ -93,6 +94,7 @@ private:
     // up by a library scan and offered for deletion as a pile of missing files.
     void refreshYtCacheWarning();
     void refreshNetworkModeUi();
+    void refreshAdminPasswordButton();
     void setupHotkeysForm();
     void makeTabsScrollable();
     void clampToScreen();
