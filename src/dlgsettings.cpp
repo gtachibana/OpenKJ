@@ -20,6 +20,8 @@
 
 #include "dlgsettings.h"
 #include "ui_dlgsettings.h"
+#include "dlgpassword.h"
+#include "dlgsetpassword.h"
 #include <QGuiApplication>
 #include <QFontDialog>
 #include <QColorDialog>
@@ -479,6 +481,13 @@ void DlgSettings::setupModeWidgets()
     localLayout->addRow(tr("Embedded API bind"), m_lineEditEmbeddedBindAddress);
     localLayout->addRow(tr("Embedded API port"), m_spinBoxEmbeddedPort);
     localLayout->addRow(tr("Up next alert"), m_spinBoxUpNextTurns);
+    // The admin login checks the same master password that guards the Song Shop's
+    // saved card, which until now could only be set from the purchase dialog.
+    m_buttonAdminPassword = new QPushButton(m_groupBoxLocalMode);
+    m_buttonAdminPassword->setToolTip(tr("The password for the request site's admin login. It also unlocks\n"
+                                         "the card and Karaoke.net account saved in the Song Shop."));
+    localLayout->addRow(tr("Admin password"), m_buttonAdminPassword);
+    refreshAdminPasswordButton();
     networkLayout->insertWidget(1, m_groupBoxLocalMode);
 
     connect(m_comboAppMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [&](int index) {
@@ -508,6 +517,22 @@ void DlgSettings::setupModeWidgets()
     });
     connect(m_spinBoxUpNextTurns, qOverload<int>(&QSpinBox::valueChanged), this, [&](int turns) {
         m_settings.setEmbeddedApiUpNextTurns(turns);
+    });
+    connect(m_buttonAdminPassword, &QPushButton::clicked, this, [&]() {
+        if (!m_settings.passIsSet()) {
+            DlgSetPassword dlgSetPw(this);
+            dlgSetPw.exec();
+        } else {
+            // Prove the old one first: it is the key to the saved Song Shop secrets,
+            // which changePassword() re-encrypts under the new one.
+            DlgPassword dlgPass(this);
+            if (dlgPass.exec() == QDialog::Accepted) {
+                DlgSetPassword dlgSetPw(this);
+                if (dlgSetPw.exec() == QDialog::Accepted)
+                    m_settings.changePassword(dlgPass.getPassword(), dlgSetPw.getPassword());
+            }
+        }
+        refreshAdminPasswordButton();
     });
 
     // Its own box, outside the Local Mode group and not scoped to a mode: the queue
@@ -891,6 +916,11 @@ void DlgSettings::refreshYtCacheWarning()
                                       "treat cached videos as library songs and offer to delete pending ones.")
                                            .arg(clash));
     m_labelYtCacheWarning->setVisible(true);
+}
+
+void DlgSettings::refreshAdminPasswordButton()
+{
+    m_buttonAdminPassword->setText(m_settings.passIsSet() ? tr("Change password...") : tr("Set password..."));
 }
 
 void DlgSettings::refreshNetworkModeUi()

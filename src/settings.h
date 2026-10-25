@@ -108,6 +108,7 @@ public:
     void clearPassword();
     bool chkPassword(QString password);
     bool passIsSet();
+    void changePassword(const QString &oldPassword, const QString &newPassword);
     void setCC(QString ccn, QString month, QString year, QString ccv, QString passwd);
     void setSaveCC(bool save);
     bool saveCC();
