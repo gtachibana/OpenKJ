@@ -17,8 +17,13 @@
 #include <QUrlQuery>
 #include <QUuid>
 #include <QPasswordDigestor>
+#include <QBuffer>
+#include <QFile>
+#include <QFileInfo>
 
+#include "okjutil.h"
 #include "searchfold.h"
+#include "src/miniz/miniz.h"
 
 namespace {
 
@@ -108,6 +113,87 @@ QJsonArray strippedEntries(const QJsonArray &entries)
         out.append(entry);
     }
     return out;
+}
+
+// Song downloads are read a chunk at a time and only while the socket has less than
+// the high-water mark still queued, so a video is never pulled into memory whole -
+// a fast LAN would otherwise drain the file into the socket buffer in one go.
+constexpr qint64 kDownloadChunkBytes = 64 * 1024;
+constexpr qint64 kDownloadHighWaterBytes = 512 * 1024;
+
+QByteArray contentTypeForSuffix(const QString &suffix)
+{
+    static const QHash<QString, QByteArray> types{
+        {"zip", "application/zip"},
+        {"mp4", "video/mp4"},
+        {"m4v", "video/x-m4v"},
+        {"mov", "video/quicktime"},
+        {"mkv", "video/x-matroska"},
+        {"webm", "video/webm"},
+        {"avi", "video/x-msvideo"},
+        {"mp3", "audio/mpeg"},
+    };
+    return types.value(suffix, "application/octet-stream");
+}
+
+// "Artist - Title.ext", with the characters no filesystem will take swapped out.
+QString downloadFileName(const QString &artist, const QString &title, const QString &suffix)
+{
+    QString base = artist.trimmed().isEmpty() ? title.trimmed() : artist.trimmed() + " - " + title.trimmed();
+    static const QRegularExpression unsafe(R"([\\/:*?"<>|\x00-\x1f])");
+    base.replace(unsafe, "_");
+    if (base.isEmpty()) {
+        base = "song";
+    }
+    return base + '.' + suffix;
+}
+
+// filename= carries an ASCII stand-in for clients that ignore filename*, which is
+// the one with the real name in it.
+QByteArray contentDisposition(const QString &fileName)
+{
+    QByteArray ascii;
+    for (const QChar ch : fileName) {
+        ascii.append(ch.unicode() >= 0x20 && ch.unicode() < 0x7f && ch != '"' ? static_cast<char>(ch.unicode()) : '_');
+    }
+    return "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" + QUrl::toPercentEncoding(fileName);
+}
+
+// Packs an MP3+CDG pair into one zip, which is how a player on the other end can
+// take the song as a single file. Stored rather than compressed: the MP3 will not
+// shrink, and a CDG is only a couple of megabytes, so deflating it would cost the UI
+// thread time to save a few seconds on the LAN.
+bool zipCdgPair(const QString &cdgPath, const QString &audioPath, QByteArray *out)
+{
+    mz_zip_archive zip{};
+    if (!mz_zip_writer_init_heap(&zip, 0, 0)) {
+        return false;
+    }
+    bool ok = true;
+    for (const QString &path : {cdgPath, audioPath}) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            ok = false;
+            break;
+        }
+        const QByteArray data = file.readAll();
+        if (!mz_zip_writer_add_mem(&zip, QFileInfo(path).fileName().toUtf8().constData(), data.constData(),
+                                   static_cast<size_t>(data.size()), MZ_NO_COMPRESSION)) {
+            ok = false;
+            break;
+        }
+    }
+    void *buffer = nullptr;
+    size_t size = 0;
+    if (ok && mz_zip_writer_finalize_heap_archive(&zip, &buffer, &size)) {
+        *out = QByteArray(static_cast<const char *>(buffer), static_cast<qsizetype>(size));
+        // Finalizing hands the buffer over to the caller; ending the writer won't free it.
+        mz_free(buffer);
+    } else {
+        ok = false;
+    }
+    mz_zip_writer_end(&zip);
+    return ok;
 }
 
 } // namespace
@@ -231,9 +317,9 @@ void OpenKJEmbeddedApi::onSocketReadyRead()
     connection->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
     connection->buffer.append(socket->readAll());
 
-    // An event-stream socket has nothing left to say; drop anything it sends so
-    // the buffer can't grow unbounded while we hold the connection open.
-    if (m_sseClients.contains(socket)) {
+    // An event-stream or download socket has nothing left to say; drop anything it
+    // sends so the buffer can't grow unbounded while we hold the connection open.
+    if (m_sseClients.contains(socket) || m_downloads.contains(socket)) {
         connection->buffer.clear();
         return;
     }
@@ -263,6 +349,10 @@ void OpenKJEmbeddedApi::onSocketReadyRead()
             beginEventStream(socket, query);
             return;
         }
+        if (cleanPath == "/local/admin/song-file") {
+            beginSongDownload(socket, query);
+            return;
+        }
     }
 
     m_currentClientKey = clientKeyForRequest(socket, request);
@@ -290,7 +380,13 @@ void OpenKJEmbeddedApi::sweepIdleConnections()
         }
     }
     for (QTcpSocket *socket : expired) {
-        socket->disconnectFromHost();
+        // A download that stopped draining still has bytes queued, and a graceful
+        // close would wait on them forever.
+        if (m_downloads.contains(socket)) {
+            socket->abort();
+        } else {
+            socket->disconnectFromHost();
+        }
     }
 
     // Piggyback the throttle cleanup: without it, one entry per peer address that
@@ -387,6 +483,7 @@ void OpenKJEmbeddedApi::onSocketDisconnected()
     }
 
     m_connections.remove(socket);
+    m_downloads.remove(socket);
     m_sseClients.remove(socket);
     m_sseDeltaClients.remove(socket);
     if (m_sseClients.isEmpty()) {
@@ -435,6 +532,92 @@ void OpenKJEmbeddedApi::beginEventStream(QTcpSocket *socket, const QUrlQuery &qu
     // snapshot, deltas or not - a tick is meaningless without something to apply
     // it to.
     writeSseFrame(socket, "queue", QJsonDocument(buildQueueResponse()).toJson(QJsonDocument::Compact));
+}
+
+void OpenKJEmbeddedApi::beginSongDownload(QTcpSocket *socket, const QUrlQuery &query)
+{
+    // Checked here rather than in a dispatcher, since this route never reaches one.
+    // 401 rather than the surface's usual 200 + ok:false: a downloader that sees a
+    // 200 saves whatever the body is as the song.
+    if (!isValidAdminSession(query.queryItemValue("token").trimmed())) {
+        sendErrorAndClose(socket, 401, "Admin authentication required");
+        return;
+    }
+
+    bool idOk = false;
+    const int songId = query.queryItemValue("id").toInt(&idOk);
+    QSqlQuery song;
+    song.prepare("SELECT path, artist, title FROM dbsongs WHERE songid = :songid AND " + catalogFilterSql());
+    song.bindValue(":songid", songId);
+    if (!idOk || !song.exec() || !song.next()) {
+        sendErrorAndClose(socket, 404, "Song not found");
+        return;
+    }
+
+    const QString path = song.value(0).toString();
+    QString suffix = QFileInfo(path).suffix().toLower();
+    QIODevice *source = nullptr;
+    if (suffix == "cdg") {
+        const QString audioPath = findMatchingAudioFile(path);
+        QByteArray zip;
+        if (audioPath.isEmpty() || !zipCdgPair(path, audioPath, &zip)) {
+            sendErrorAndClose(socket, 404, "Song files missing");
+            return;
+        }
+        auto *buffer = new QBuffer(socket);
+        buffer->setData(zip);
+        source = buffer;
+        suffix = "zip";
+    } else {
+        source = new QFile(path, socket);
+    }
+    if (!source->open(QIODevice::ReadOnly)) {
+        delete source;
+        sendErrorAndClose(socket, 404, "Song file missing");
+        return;
+    }
+
+    const QString fileName = downloadFileName(song.value(1).toString(), song.value(2).toString(), suffix);
+    QByteArray headers;
+    headers.append("HTTP/1.1 200 OK\r\n");
+    headers.append("Content-Type: " + contentTypeForSuffix(suffix) + "\r\n");
+    headers.append("Content-Length: " + QByteArray::number(source->size()) + "\r\n");
+    headers.append("Content-Disposition: " + contentDisposition(fileName) + "\r\n");
+    headers.append("Cache-Control: no-store\r\n");
+    headers.append("Connection: close\r\n\r\n");
+    socket->write(headers);
+
+    m_downloads.insert(socket, source);
+    connect(socket, &QTcpSocket::bytesWritten, this, [this, socket] { pumpDownload(socket); });
+    pumpDownload(socket);
+}
+
+void OpenKJEmbeddedApi::pumpDownload(QTcpSocket *socket)
+{
+    QIODevice *source = m_downloads.value(socket);
+    if (!source) {
+        return;
+    }
+    // Progress counts as activity, so the idle sweep only drops a transfer that stalls.
+    if (auto connection = m_connections.find(socket); connection != m_connections.end()) {
+        connection->lastActivityMs = QDateTime::currentMSecsSinceEpoch();
+    }
+
+    while (socket->bytesToWrite() < kDownloadHighWaterBytes && !source->atEnd()) {
+        const QByteArray chunk = source->read(kDownloadChunkBytes);
+        if (chunk.isEmpty()) {
+            // A read error mid-file. Content-Length has already promised the rest, so
+            // cutting the connection is the only honest way to say it isn't coming.
+            socket->abort();
+            return;
+        }
+        socket->write(chunk);
+    }
+    if (source->atEnd()) {
+        m_downloads.remove(socket);
+        // Graceful, so whatever is still buffered goes out before the close.
+        socket->disconnectFromHost();
+    }
 }
 
 void OpenKJEmbeddedApi::scheduleSseBroadcast()
@@ -1065,6 +1248,56 @@ QJsonObject OpenKJEmbeddedApi::commandSearch(const QJsonObject &payload)
     return out;
 }
 
+QJsonObject OpenKJEmbeddedApi::listLibraryForAdmin(const QUrlQuery &query)
+{
+    if (!isValidAdminSession(query.queryItemValue("token").trimmed())) {
+        return QJsonObject{{"ok", false}, {"error", "Admin authentication required"}};
+    }
+
+    const QStringList terms = query.queryItemValue("q", QUrl::FullyDecoded).split(' ', Qt::SkipEmptyParts);
+    const int limit = limitParam(query, 200, 1000);
+    const int offset = std::max(0, query.queryItemValue("offset").toInt());
+
+    // Same matching and order as commandSearch(), so the two agree on what a query finds.
+    QString sql = "SELECT songid, artist, title, COALESCE(duration, 0), discid, path FROM dbsongs "
+                  "WHERE " + catalogFilterSql();
+    for (int i = 0; i < terms.size(); ++i) {
+        sql += QString("AND (COALESCE(artistfold, artist) || ' ' || COALESCE(titlefold, title)) "
+                       "LIKE :term%1 ").arg(i);
+    }
+    sql += QString("ORDER BY artistfold, titlefold LIMIT %1 OFFSET %2").arg(limit).arg(offset);
+
+    QSqlQuery songQuery;
+    songQuery.prepare(sql);
+    for (int i = 0; i < terms.size(); ++i) {
+        songQuery.bindValue(QString(":term%1").arg(i), QString("%%1%").arg(okj::foldForSearch(terms.at(i))));
+    }
+    if (!songQuery.exec()) {
+        return QJsonObject{{"ok", false}, {"error", "Library query failed"}};
+    }
+
+    QJsonArray songs;
+    while (songQuery.next()) {
+        const QString discId = songQuery.value(4).toString();
+        // "cdg" means an MP3+CDG pair, which the song-file route sends as one zip.
+        QJsonObject song{
+            {"song_id", songQuery.value(0).toInt()},
+            {"artist", songQuery.value(1).toString()},
+            {"title", songQuery.value(2).toString()},
+            {"duration_seconds", std::max(1, songQuery.value(3).toInt() / 1000)},
+            {"format", QFileInfo(songQuery.value(5).toString()).suffix().toLower()},
+        };
+        if (discId == kYoutubeDiscId) {
+            song.insert("source", "youtube");
+        } else if (!discId.isEmpty()) {
+            song.insert("discid", discId);
+        }
+        songs.append(song);
+    }
+
+    return QJsonObject{{"ok", true}, {"songs", songs}, {"offset", offset}, {"limit", limit}};
+}
+
 bool OpenKJEmbeddedApi::nameIsClaimedByAnotherUser(const QString &singerName, const QString &authorizedUser) const
 {
     const QString normalized = normalizeUsername(singerName);
@@ -1447,6 +1680,9 @@ QByteArray OpenKJEmbeddedApi::handleLocalApiGet(const QString &path, const QUrlQ
     }
     if (path == "/local/auth/me") {
         return jsonResponse(200, currentAdmin(query));
+    }
+    if (path == "/local/admin/library") {
+        return jsonResponse(200, listLibraryForAdmin(query));
     }
     if (path == "/local/capabilities") {
         return jsonResponse(200, buildCapabilities());
